@@ -3,8 +3,8 @@ use std::os::fd::{FromRawFd, IntoRawFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use agent_sandbox_protocol::{
@@ -15,6 +15,7 @@ use agent_sandbox_protocol::{
 use crate::{NativeProcess, SandboxError, ValidatedExecution, ValidatedPolicy};
 
 static CGROUP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+static CGROUP_ROOT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
 
 #[derive(Debug)]
 pub(crate) struct PreparedUnixSandbox {
@@ -301,10 +302,20 @@ fn probe_bwrap(bwrap: &Path) -> Result<(), SandboxError> {
 }
 
 fn cgroup_root() -> Result<PathBuf, SandboxError> {
-    let root = match std::env::var_os("AGENT_SANDBOX_CGROUP_ROOT") {
-        Some(path) if !path.is_empty() => PathBuf::from(path),
-        _ => current_cgroup_path()?,
+    match CGROUP_ROOT.get_or_init(|| initialize_cgroup_root().map_err(|error| error.to_string())) {
+        Ok(root) => Ok(root.clone()),
+        Err(error) => Err(SandboxError::BackendUnavailable(error.clone())),
+    }
+}
+
+fn initialize_cgroup_root() -> Result<PathBuf, SandboxError> {
+    let (root, discovered) = match std::env::var_os("AGENT_SANDBOX_CGROUP_ROOT") {
+        Some(path) if !path.is_empty() => (PathBuf::from(path), false),
+        _ => (current_cgroup_path()?, true),
     };
+    if discovered {
+        prepare_delegated_root(&root)?;
+    }
     if root.is_dir() && root.join("cgroup.controllers").is_file() {
         Ok(root)
     } else {
@@ -328,6 +339,28 @@ fn current_cgroup_path() -> Result<PathBuf, SandboxError> {
             )
         })?;
     Ok(Path::new("/sys/fs/cgroup").join(relative.trim_start_matches('/')))
+}
+
+fn prepare_delegated_root(root: &Path) -> Result<(), SandboxError> {
+    let manager = root.join("agent-sandboxd");
+    std::fs::create_dir_all(&manager).map_err(|error| {
+        SandboxError::BackendUnavailable(format!(
+            "cannot create daemon cgroup in delegated scope: {error}"
+        ))
+    })?;
+    std::fs::write(manager.join("cgroup.procs"), std::process::id().to_string()).map_err(
+        |error| {
+            SandboxError::BackendUnavailable(format!(
+                "cannot move daemon into delegated manager cgroup: {error}"
+            ))
+        },
+    )?;
+    std::fs::write(root.join("cgroup.subtree_control"), "+cpu +memory +pids").map_err(|error| {
+        SandboxError::BackendUnavailable(format!(
+            "cannot enable delegated cgroup controllers: {error}"
+        ))
+    })?;
+    Ok(())
 }
 
 fn probe_cgroup(root: &Path) -> Result<(), SandboxError> {

@@ -51,6 +51,8 @@ jobs:
             "$AGENT_SANDBOX_CGROUP_ROOT/cgroup.procs" \
             "$AGENT_SANDBOX_CGROUP_ROOT/cgroup.subtree_control"
           echo '+cpu +memory +pids' > "$AGENT_SANDBOX_CGROUP_ROOT/cgroup.subtree_control"
+          mkdir "$AGENT_SANDBOX_CGROUP_ROOT/driver"
+          sudo chown "$USER":"$(id -gn)" "$AGENT_SANDBOX_CGROUP_ROOT/driver/cgroup.procs"
           test -f "$AGENT_SANDBOX_CGROUP_ROOT/cgroup.controllers"
       - run: cargo build --workspace
       - name: Provision Windows native sandbox
@@ -62,6 +64,6 @@ jobs:
         shell: bash
         run: |
           if [ "${{ runner.os }}" = Linux ]; then
-            echo "$$" | sudo tee "$AGENT_SANDBOX_CGROUP_ROOT/cgroup.procs" >/dev/null
+            echo "$$" | sudo tee "$AGENT_SANDBOX_CGROUP_ROOT/driver/cgroup.procs" >/dev/null
           fi
           npm test
