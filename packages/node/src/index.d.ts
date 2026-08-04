@@ -20,6 +20,7 @@ export interface SandboxPolicy {
     }>
     protectedRoots?: string[]
     tempBytes?: number
+    lease?: { mode: 'ephemeral' | 'persistent' }
   }
   network?: { mode: 'deny' | 'host' }
   environment?: { inherit?: string[]; allowSet?: string[] }
@@ -116,6 +117,10 @@ export class AgentSandboxClient {
     policy: SandboxPolicy
     metadata?: { subject?: string; subjectId?: string }
   }): Promise<SandboxHandle>
+  revokeAuthorization(input: {
+    tenantId: string
+    authorizationId: string
+  }): Promise<Readonly<{ authorizationId: string }>>
   close(): Promise<unknown>
 }
 

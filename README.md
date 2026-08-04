@@ -29,11 +29,12 @@ This runtime protects against untrusted repository scripts and model-generated c
 
 On Windows:
 
-- each sandbox receives a unique AppContainer profile and package SID;
-- the package SID receives read-only or modify ACL entries only on declared mount trees;
-- reparse points inside a mount are rejected before ACL mutation;
-- ACL changes are journaled before application and revoked by direct Win32 security APIs;
-- a later daemon recovers retained journals after an abrupt daemon/client death;
+- ephemeral sandboxes receive a unique AppContainer profile and package SID;
+- persistent managed workspaces reuse a stable package SID per tenant authorization while executions retain independent handles and Job Objects;
+- package SIDs receive read-only or modify ACL entries only on declared mount trees;
+- hard-link aliases and reparse targets are accepted only when every target remains inside the mount boundary;
+- ephemeral ACL changes are journaled and revoked; persistent workspace authorizations are recorded and reused across daemon restarts;
+- a later daemon recovers interrupted ephemeral leases and incomplete persistent enrollment after abrupt client death;
 - `network: deny` grants no network capability;
 - `network: host` grants outbound `InternetClient` and should be treated as a broad, explicit authorization;
 - child stdio is inherited through an explicit handle list;
@@ -156,6 +157,8 @@ The SDK requires an absolute daemon path and can verify a SHA-256 digest. It fil
 - A policy must contain one to sixteen directory mounts.
 - Mount sources must be absolute, existing directories and cannot overlap a declared protected root.
 - Mount-source path components cannot be symbolic links or Windows reparse points.
+- `filesystem.lease.mode: persistent` enrolls an empty managed directory under a stable `tenantId` and `authorizationId`; subsequent sandboxes reuse that exact mount/access authorization without walking the tree.
+- Persistent enrollment is intentionally rejected for a non-empty unregistered directory. Hosts must enroll before cloning or creating project files.
 - Execution cwd is a logical mount plus a relative path; absolute paths and `..` are rejected.
 - `exec.program` is a bare name resolved from a trusted absolute PATH entry.
 - `shell` uses the backend's trusted default shell.
@@ -198,8 +201,8 @@ A host must never catch a sandbox failure and silently run the same command on t
 - Linux and macOS native isolation are not implemented yet.
 - Windows process-count enforcement and absolute CPU-time accounting are incomplete, so the backend reports `limited`.
 - Filesystem RPC, PTY, network broker/allowlists, and remote/VM backends are not implemented.
-- Windows ACL projection currently walks the mount tree. Very large workspaces have proportional setup/cleanup cost.
-- The policy rejects reparse points but does not yet provide a safe projection for repositories that intentionally contain them.
+- Ephemeral Windows ACL projection validates the complete mount tree, so very large existing workspaces have proportional first-use cost. Managed persistent workspaces avoid that scan after empty-directory enrollment.
+- Persistent authorization assumes the host controls enrollment and subsequent imports. A host must not relabel an arbitrary non-empty directory as managed.
 - Parent-PID identity supervision is represented in the CLI but direct parent-handle death monitoring is not complete yet.
 
 ## License

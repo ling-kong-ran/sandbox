@@ -5,11 +5,17 @@ use std::path::{Path, PathBuf};
 
 use agent_sandbox_protocol::{CapabilityReport, EnforcementStatus, FeatureState};
 #[cfg(windows)]
-use agent_sandbox_protocol::{CommandSpec, MountAccess, NetworkMode};
+use agent_sandbox_protocol::{CommandSpec, FilesystemLeaseMode, MountAccess, NetworkMode};
 #[cfg(windows)]
 use sha2::{Digest, Sha256};
 
 use crate::{SandboxError, ValidatedExecution, ValidatedPolicy};
+
+#[derive(Debug, Clone)]
+pub struct AuthorizationSpec {
+    pub tenant_id: String,
+    pub authorization_id: String,
+}
 
 #[derive(Debug, Clone)]
 pub struct ProfileSpec {
@@ -92,6 +98,7 @@ impl NativeBackend {
         sandbox_id: &str,
         policy: ValidatedPolicy,
         profile: ProfileSpec,
+        authorization: AuthorizationSpec,
     ) -> Result<PreparedSandbox, SandboxError> {
         if !matches!(
             policy.original.backend,
@@ -104,7 +111,7 @@ impl NativeBackend {
         }
         #[cfg(windows)]
         {
-            let platform = windows_backend::prepare(sandbox_id, &policy).await?;
+            let platform = windows_backend::prepare(sandbox_id, &policy, &authorization).await?;
             let report = self.report();
             let mut digest = Sha256::new();
             digest.update(policy.fingerprint.as_bytes());
@@ -121,7 +128,7 @@ impl NativeBackend {
         }
         #[cfg(not(windows))]
         {
-            let _ = (sandbox_id, policy, profile);
+            let _ = (sandbox_id, policy, profile, authorization);
             Err(SandboxError::BackendUnavailable(
                 "native backend unavailable".into(),
             ))
@@ -141,6 +148,23 @@ impl NativeBackend {
         #[cfg(not(windows))]
         {
             let _ = (sandbox, execution, stdin_pipe);
+            Err(SandboxError::BackendUnavailable(
+                "native backend unavailable".into(),
+            ))
+        }
+    }
+
+    pub async fn revoke_authorization(
+        &self,
+        authorization: &AuthorizationSpec,
+    ) -> Result<(), SandboxError> {
+        #[cfg(windows)]
+        {
+            windows_backend::revoke_persistent_authorization(authorization).await
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = authorization;
             Err(SandboxError::BackendUnavailable(
                 "native backend unavailable".into(),
             ))
@@ -248,9 +272,10 @@ mod windows_backend {
         pub profile_name: String,
         pub sid: String,
         profile: AppContainerProfile,
-        journal: PathBuf,
+        journal: Option<PathBuf>,
         mounts: Vec<PathBuf>,
         acl_strategy: u8,
+        persistent_profile: bool,
     }
 
     #[derive(Debug, Clone)]
@@ -274,6 +299,24 @@ mod windows_backend {
         mounts: Vec<PathBuf>,
         #[serde(default)]
         acl_strategy: u8,
+    }
+
+    #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "camelCase")]
+    struct PersistentMount {
+        source: PathBuf,
+        access: MountAccess,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct PersistentAuthorization {
+        version: u8,
+        state: String,
+        capability_name: String,
+        capability_sid: String,
+        policy_fingerprint: String,
+        mounts: Vec<PersistentMount>,
     }
 
     pub fn probe() -> Result<(), SandboxError> {
@@ -362,12 +405,100 @@ mod windows_backend {
                     ))
                 })?;
         }
+        recover_persistent_authorizations(&state_dir).await
+    }
+
+    async fn recover_persistent_authorizations(state_dir: &Path) -> Result<(), SandboxError> {
+        let directory = state_dir.join("authorizations");
+        let mut entries = match tokio::fs::read_dir(&directory).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(SandboxError::BackendUnavailable(format!(
+                    "cannot inspect persistent authorizations: {error}"
+                )));
+            }
+        };
+        while let Some(entry) = entries.next_entry().await.map_err(|error| {
+            SandboxError::BackendUnavailable(format!(
+                "cannot read persistent authorization directory: {error}"
+            ))
+        })? {
+            if entry.path().extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            let bytes = tokio::fs::read(entry.path()).await.map_err(|error| {
+                SandboxError::BackendUnavailable(format!(
+                    "cannot read persistent authorization: {error}"
+                ))
+            })?;
+            let record: PersistentAuthorization =
+                serde_json::from_slice(&bytes).map_err(|error| {
+                    SandboxError::BackendUnavailable(format!(
+                        "invalid persistent authorization: {error}"
+                    ))
+                })?;
+            if record.version != 1
+                || !record.capability_name.starts_with("agent.sandbox.")
+                || !record.capability_sid.starts_with("S-1-15-2-")
+                || record
+                    .mounts
+                    .iter()
+                    .any(|mount| !mount.source.is_absolute())
+            {
+                return Err(SandboxError::BackendUnavailable(
+                    "persistent authorization failed integrity validation".into(),
+                ));
+            }
+            match record.state.as_str() {
+                "active" => continue,
+                "preparing" => {
+                    for mount in record.mounts.iter().rev() {
+                        let source = mount.source.clone();
+                        let sid = record.capability_sid.clone();
+                        tokio::task::spawn_blocking(move || {
+                            windows_acl::revoke_root(&source, &sid)
+                        })
+                        .await
+                        .map_err(|error| {
+                            SandboxError::BackendUnavailable(format!(
+                                "persistent authorization recovery task failed: {error}"
+                            ))
+                        })??;
+                    }
+                    AppContainerProfile::ensure(
+                        &record.capability_name,
+                        "Agent Sandbox",
+                        Some("Persistent workspace sandbox"),
+                    )
+                    .and_then(|profile| profile.delete())
+                    .map_err(|error| {
+                        SandboxError::BackendUnavailable(format!(
+                            "cannot recover persistent AppContainer profile: {error}"
+                        ))
+                    })?;
+                    tokio::fs::remove_file(entry.path())
+                        .await
+                        .map_err(|error| {
+                            SandboxError::BackendUnavailable(format!(
+                                "cannot remove recovered persistent authorization: {error}"
+                            ))
+                        })?;
+                }
+                _ => {
+                    return Err(SandboxError::BackendUnavailable(
+                        "persistent authorization has an unknown state".into(),
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 
     pub async fn prepare(
         sandbox_id: &str,
         policy: &ValidatedPolicy,
+        authorization: &AuthorizationSpec,
     ) -> Result<PreparedWindowsSandbox, SandboxError> {
         probe()?;
         let suffix: String = sandbox_id
@@ -375,13 +506,43 @@ mod windows_backend {
             .filter(|value| value.is_ascii_alphanumeric())
             .take(32)
             .collect();
-        let profile_name = format!("agent.sandbox.{suffix}");
+        let persistent = policy.original.filesystem.lease.mode == FilesystemLeaseMode::Persistent;
+        let profile_name = if persistent {
+            format!(
+                "agent.sandbox.{}",
+                persistent_authorization_hash(authorization)
+                    .chars()
+                    .take(24)
+                    .collect::<String>()
+            )
+        } else {
+            format!("agent.sandbox.{suffix}")
+        };
         let profile = AppContainerProfile::ensure(
             &profile_name,
             "Agent Sandbox",
             Some("Ephemeral native agent sandbox"),
         )
         .map_err(|error| SandboxError::BackendUnavailable(error.to_string()))?;
+        if persistent {
+            prepare_persistent_authorization(
+                policy,
+                authorization,
+                &profile_name,
+                profile.sid.as_string(),
+            )
+            .await?;
+            return Ok(PreparedWindowsSandbox {
+                profile_name,
+                sid: profile.sid.as_string().to_string(),
+                profile,
+                journal: None,
+                mounts: Vec::new(),
+                acl_strategy: ACL_STRATEGY_ROOT_INHERITED,
+                persistent_profile: true,
+            });
+        }
+
         let state_dir = state_directory()?;
         tokio::fs::create_dir_all(&state_dir)
             .await
@@ -423,10 +584,232 @@ mod windows_backend {
             profile_name,
             sid: record.sid,
             profile,
-            journal,
+            journal: Some(journal),
             mounts,
             acl_strategy: record.acl_strategy,
+            persistent_profile: false,
         })
+    }
+
+    fn persistent_authorization_hash(authorization: &AuthorizationSpec) -> String {
+        let mut digest = Sha256::new();
+        digest.update(authorization.tenant_id.as_bytes());
+        digest.update([0]);
+        digest.update(authorization.authorization_id.as_bytes());
+        hex::encode(digest.finalize())
+    }
+
+    async fn prepare_persistent_authorization(
+        policy: &ValidatedPolicy,
+        authorization: &AuthorizationSpec,
+        profile_name: &str,
+        profile_sid: &str,
+    ) -> Result<(), SandboxError> {
+        let mounts: Vec<_> = policy
+            .mounts
+            .values()
+            .map(|mount| PersistentMount {
+                source: mount.source.clone(),
+                access: mount.access,
+            })
+            .collect();
+        let authorization_hash = persistent_authorization_hash(authorization);
+        let capability_name = profile_name.to_string();
+        let capability_sid = profile_sid.to_string();
+        let mut policy_digest = Sha256::new();
+        for mount in &mounts {
+            policy_digest.update(mount.source.to_string_lossy().as_bytes());
+            policy_digest.update([0]);
+            policy_digest.update(match mount.access {
+                MountAccess::ReadOnly => b"read-only".as_slice(),
+                MountAccess::ReadWrite => b"read-write".as_slice(),
+            });
+            policy_digest.update([0]);
+        }
+        let policy_fingerprint = format!("sha256:{}", hex::encode(policy_digest.finalize()));
+        let directory = state_directory()?.join("authorizations");
+        tokio::fs::create_dir_all(&directory)
+            .await
+            .map_err(|error| {
+                SandboxError::BackendUnavailable(format!(
+                    "cannot create persistent authorization directory: {error}"
+                ))
+            })?;
+        let path = directory.join(format!("{authorization_hash}.json"));
+        if let Ok(bytes) = tokio::fs::read(&path).await {
+            let record: PersistentAuthorization =
+                serde_json::from_slice(&bytes).map_err(|error| {
+                    SandboxError::BackendUnavailable(format!(
+                        "invalid persistent authorization record: {error}"
+                    ))
+                })?;
+            if record.version != 1
+                || record.state != "active"
+                || record.capability_name != capability_name
+                || record.capability_sid != capability_sid
+                || record.policy_fingerprint != policy_fingerprint
+                || record.mounts != mounts
+            {
+                return Err(SandboxError::InvalidPolicy(
+                    "persistent authorization does not match the requested workspace policy".into(),
+                ));
+            }
+            return Ok(());
+        }
+        for mount in &mounts {
+            let mut entries = tokio::fs::read_dir(&mount.source).await.map_err(|error| {
+                SandboxError::CapabilityUnavailable(format!(
+                    "cannot inspect managed workspace before enrollment: {error}"
+                ))
+            })?;
+            if entries
+                .next_entry()
+                .await
+                .map_err(|error| {
+                    SandboxError::CapabilityUnavailable(format!(
+                        "cannot inspect managed workspace before enrollment: {error}"
+                    ))
+                })?
+                .is_some()
+            {
+                return Err(SandboxError::InvalidPolicy(
+                    "persistent workspace enrollment requires an empty managed directory".into(),
+                ));
+            }
+        }
+        let mut record = PersistentAuthorization {
+            version: 1,
+            state: "preparing".into(),
+            capability_name: capability_name.clone(),
+            capability_sid: capability_sid.clone(),
+            policy_fingerprint,
+            mounts,
+        };
+        tokio::fs::write(
+            &path,
+            serde_json::to_vec(&record)
+                .map_err(|error| SandboxError::Internal(error.to_string()))?,
+        )
+        .await
+        .map_err(|error| {
+            SandboxError::BackendUnavailable(format!(
+                "cannot persist workspace authorization journal: {error}"
+            ))
+        })?;
+        let mut granted: Vec<PathBuf> = Vec::new();
+        for mount in &record.mounts {
+            let source = mount.source.clone();
+            let sid = capability_sid.clone();
+            let mask = mount_access_mask(mount.access);
+            let result =
+                tokio::task::spawn_blocking(move || windows_acl::grant_root(&source, &sid, mask))
+                    .await
+                    .map_err(|error| {
+                        SandboxError::CapabilityUnavailable(format!(
+                            "persistent ACL grant task failed: {error}"
+                        ))
+                    })?;
+            if let Err(error) = result {
+                for source in granted.iter().rev() {
+                    let source = source.clone();
+                    let sid = capability_sid.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        windows_acl::revoke_root(&source, &sid)
+                    })
+                    .await;
+                }
+                let _ = tokio::fs::remove_file(&path).await;
+                return Err(error);
+            }
+            granted.push(mount.source.clone());
+        }
+        record.state = "active".into();
+        tokio::fs::write(
+            &path,
+            serde_json::to_vec(&record)
+                .map_err(|error| SandboxError::Internal(error.to_string()))?,
+        )
+        .await
+        .map_err(|error| {
+            SandboxError::BackendUnavailable(format!(
+                "cannot activate persistent workspace authorization: {error}"
+            ))
+        })?;
+        Ok(())
+    }
+
+    pub async fn revoke_persistent_authorization(
+        authorization: &AuthorizationSpec,
+    ) -> Result<(), SandboxError> {
+        let path = state_directory()?.join("authorizations").join(format!(
+            "{}.json",
+            persistent_authorization_hash(authorization)
+        ));
+        let bytes = match tokio::fs::read(&path).await {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(SandboxError::BackendUnavailable(format!(
+                    "cannot read persistent authorization for revocation: {error}"
+                )));
+            }
+        };
+        let record: PersistentAuthorization = serde_json::from_slice(&bytes).map_err(|error| {
+            SandboxError::BackendUnavailable(format!(
+                "invalid persistent authorization for revocation: {error}"
+            ))
+        })?;
+        if record.version != 1
+            || record.state != "active"
+            || !record.capability_name.starts_with("agent.sandbox.")
+            || !record.capability_sid.starts_with("S-1-15-2-")
+            || record
+                .mounts
+                .iter()
+                .any(|mount| !mount.source.is_absolute())
+        {
+            return Err(SandboxError::BackendUnavailable(
+                "persistent authorization failed revocation integrity validation".into(),
+            ));
+        }
+        for mount in record.mounts.iter().rev() {
+            let source = mount.source.clone();
+            let sid = record.capability_sid.clone();
+            tokio::task::spawn_blocking(move || windows_acl::revoke_root(&source, &sid))
+                .await
+                .map_err(|error| {
+                    SandboxError::BackendUnavailable(format!(
+                        "persistent authorization revoke task failed: {error}"
+                    ))
+                })??;
+        }
+        AppContainerProfile::ensure(
+            &record.capability_name,
+            "Agent Sandbox",
+            Some("Persistent workspace sandbox"),
+        )
+        .and_then(|profile| profile.delete())
+        .map_err(|error| {
+            SandboxError::BackendUnavailable(format!(
+                "cannot delete persistent AppContainer profile: {error}"
+            ))
+        })?;
+        tokio::fs::remove_file(path).await.map_err(|error| {
+            SandboxError::BackendUnavailable(format!(
+                "cannot remove persistent authorization record: {error}"
+            ))
+        })?;
+        Ok(())
+    }
+
+    fn mount_access_mask(access: MountAccess) -> u32 {
+        use windows::Win32::Storage::FileSystem::{FILE_GENERIC_READ, FILE_GENERIC_WRITE};
+        match access {
+            MountAccess::ReadOnly => FILE_GENERIC_READ.0,
+            MountAccess::ReadWrite => {
+                FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0 | 0x0001_0000 | 0x0000_0040
+            }
+        }
     }
 
     async fn grant_mount(
@@ -434,13 +817,7 @@ mod windows_backend {
         path: &Path,
         access: MountAccess,
     ) -> Result<(), SandboxError> {
-        use windows::Win32::Storage::FileSystem::{FILE_GENERIC_READ, FILE_GENERIC_WRITE};
-        let mask = match access {
-            MountAccess::ReadOnly => FILE_GENERIC_READ.0,
-            MountAccess::ReadWrite => {
-                FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0 | 0x0001_0000 | 0x0000_0040
-            }
-        };
+        let mask = mount_access_mask(access);
         let path = path.to_path_buf();
         let sid = profile.sid.as_string().to_string();
         let grant_path = path.clone();
@@ -482,16 +859,18 @@ mod windows_backend {
                 failures.push(error.to_string());
             }
         }
-        match platform.profile.clone().delete() {
-            Ok(()) => {}
-            Err(error) => failures.push(format!("cannot delete AppContainer profile: {error}")),
+        if !platform.persistent_profile {
+            match platform.profile.clone().delete() {
+                Ok(()) => {}
+                Err(error) => failures.push(format!("cannot delete AppContainer profile: {error}")),
+            }
         }
         if failures.is_empty() {
-            tokio::fs::remove_file(&platform.journal)
-                .await
-                .map_err(|error| {
+            if let Some(journal) = &platform.journal {
+                tokio::fs::remove_file(journal).await.map_err(|error| {
                     SandboxError::Internal(format!("cannot remove ACL journal: {error}"))
                 })?;
+            }
             Ok(())
         } else {
             Err(SandboxError::Internal(format!(

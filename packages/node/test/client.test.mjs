@@ -70,6 +70,31 @@ test('client handshakes, probes, executes, streams output, and closes', async ()
   }
 })
 
+test('client rejects invalid command kinds before sending them to the daemon', async () => {
+  const client = await createClient()
+  try {
+    const sandbox = await client.createSandbox({
+      tenantId: 'tenant-command-validation',
+      profile: 'node-default',
+      authorizationId: 'grant-command-validation',
+      policy: policy(),
+    })
+    await assert.rejects(
+      sandbox.exec({
+        command: { kind: 'script', script: 'echo invalid' },
+        cwd: { mount: 'workspace', path: '.' },
+      }),
+      (error) =>
+        error instanceof AgentSandboxError &&
+        error.code === 'SANDBOX_PROTOCOL_INVALID_MESSAGE' &&
+        error.category === 'protocol',
+    )
+    await sandbox.close()
+  } finally {
+    await client.close()
+  }
+})
+
 test('protocol errors retain stable code and category', async () => {
   const client = await createClient()
   try {

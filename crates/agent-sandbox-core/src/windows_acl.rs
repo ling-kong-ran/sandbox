@@ -55,6 +55,10 @@ impl Drop for LocalAllocation {
 
 pub fn grant_tree(root: &Path, sid: &str, access: u32) -> Result<(), SandboxError> {
     checked_tree(root, true)?;
+    grant_root(root, sid, access)
+}
+
+pub fn grant_root(root: &Path, sid: &str, access: u32) -> Result<(), SandboxError> {
     apply_acl(root, sid, Some(access), INHERIT_CHILDREN)
 }
 

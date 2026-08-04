@@ -2,7 +2,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_sandbox_core::{NativeBackend, PreparedSandbox, ProfileSpec, SandboxError};
+use agent_sandbox_core::{
+    AuthorizationSpec, NativeBackend, PreparedSandbox, ProfileSpec, SandboxError,
+};
 use agent_sandbox_protocol::{
     ClientMessage, ErrorCategory, MAX_CONTROL_MESSAGE_BYTES, OutputStream, PROTOCOL_MAJOR,
     PROTOCOL_MINOR, ProtocolError, ProtocolVersion, ServerMessage, SignalKind, StdinMode,
@@ -69,6 +71,8 @@ impl CancelReason {
 
 struct SandboxRecord {
     prepared: Arc<PreparedSandbox>,
+    tenant_id: String,
+    authorization_id: String,
 }
 
 struct ExecutionControl {
@@ -171,7 +175,14 @@ impl Daemon {
             }
         };
         let sandbox_id = Uuid::new_v4().to_string();
-        let mut prepared = match backend.prepare(&sandbox_id, validated, profile).await {
+        let authorization = AuthorizationSpec {
+            tenant_id: tenant_id.clone(),
+            authorization_id: authorization_id.clone(),
+        };
+        let mut prepared = match backend
+            .prepare(&sandbox_id, validated, profile, authorization)
+            .await
+        {
             Ok(value) => value,
             Err(error) => {
                 self.send_error(Some(request_id), None, error).await;
@@ -192,6 +203,8 @@ impl Daemon {
             sandbox_id.clone(),
             SandboxRecord {
                 prepared: Arc::new(prepared),
+                tenant_id,
+                authorization_id,
             },
         );
         self.send(ServerMessage::SandboxCreated {
@@ -203,6 +216,56 @@ impl Daemon {
             capabilities,
         })
         .await;
+    }
+
+    async fn revoke_authorization(
+        &self,
+        request_id: String,
+        tenant_id: String,
+        authorization_id: String,
+    ) {
+        if let Err(error) = validate_identifier("tenantId", &tenant_id)
+            .and_then(|_| validate_identifier("authorizationId", &authorization_id))
+        {
+            self.send_error(Some(request_id), None, error).await;
+            return;
+        }
+        if self.sandboxes.lock().await.values().any(|record| {
+            record.tenant_id == tenant_id && record.authorization_id == authorization_id
+        }) {
+            self.send_error(
+                Some(request_id),
+                None,
+                SandboxError::InvalidPolicy(
+                    "persistent authorization is still used by an active sandbox".into(),
+                ),
+            )
+            .await;
+            return;
+        }
+        let Some(backend) = &self.backend else {
+            self.send_error(
+                Some(request_id),
+                None,
+                SandboxError::BackendUnavailable("isolation backend is unavailable".into()),
+            )
+            .await;
+            return;
+        };
+        let authorization = AuthorizationSpec {
+            tenant_id,
+            authorization_id: authorization_id.clone(),
+        };
+        match backend.revoke_authorization(&authorization).await {
+            Ok(()) => {
+                self.send(ServerMessage::AuthorizationRevoked {
+                    request_id,
+                    authorization_id,
+                })
+                .await;
+            }
+            Err(error) => self.send_error(Some(request_id), None, error).await,
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -817,6 +880,15 @@ async fn run_child(
                 request_id,
                 sandbox_id,
             } => daemon.close_sandbox(request_id, sandbox_id).await,
+            ClientMessage::RevokeAuthorization {
+                request_id,
+                tenant_id,
+                authorization_id,
+            } => {
+                daemon
+                    .revoke_authorization(request_id, tenant_id, authorization_id)
+                    .await;
+            }
             ClientMessage::Shutdown { request_id } => {
                 daemon.shutdown(CancelReason::ClientClosed).await;
                 daemon.send(ServerMessage::ShutdownAck { request_id }).await;

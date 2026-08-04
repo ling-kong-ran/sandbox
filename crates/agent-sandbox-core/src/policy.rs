@@ -495,6 +495,7 @@ mod tests {
                 }],
                 protected_roots: Vec::new(),
                 temp_bytes: 1024 * 1024,
+                lease: Default::default(),
             },
             network: NetworkPolicy::default(),
             environment: EnvironmentPolicy {

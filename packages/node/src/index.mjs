@@ -158,6 +158,14 @@ export class AgentSandboxClient {
     return sandbox
   }
 
+  async revokeAuthorization({ tenantId, authorizationId }) {
+    const message = await this.#request(
+      { type: 'revokeAuthorization', tenantId, authorizationId },
+      'authorizationRevoked',
+    )
+    return deepFreeze({ authorizationId: message.authorizationId })
+  }
+
   async close() {
     if (this.closed) return this.closePromise
     const sandboxes = [...this.sandboxes]
@@ -173,6 +181,12 @@ export class AgentSandboxClient {
 
   async _spawn(sandboxId, input) {
     if (this.closed) throw daemonClosedError()
+    if (!['exec', 'shell'].includes(input?.command?.kind)) {
+      throw new AgentSandboxError('Sandbox command kind must be exec or shell', {
+        code: 'SANDBOX_PROTOCOL_INVALID_MESSAGE',
+        category: 'protocol',
+      })
+    }
     const executionId = randomUUID()
     const process = new SandboxProcess(this, executionId)
     if (input.onOutput) process.onOutput(input.onOutput)

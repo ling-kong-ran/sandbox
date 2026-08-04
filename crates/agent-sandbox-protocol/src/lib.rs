@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 pub const PROTOCOL_MAJOR: u16 = 1;
-pub const PROTOCOL_MINOR: u16 = 0;
+pub const PROTOCOL_MINOR: u16 = 1;
 pub const MAX_CONTROL_MESSAGE_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,6 +80,21 @@ pub struct MountPolicy {
     pub access: MountAccess,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum FilesystemLeaseMode {
+    #[default]
+    Ephemeral,
+    Persistent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct FilesystemLeasePolicy {
+    #[serde(default)]
+    pub mode: FilesystemLeaseMode,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FilesystemPolicy {
@@ -89,6 +104,8 @@ pub struct FilesystemPolicy {
     pub protected_roots: Vec<String>,
     #[serde(default = "default_temp_bytes")]
     pub temp_bytes: u64,
+    #[serde(default)]
+    pub lease: FilesystemLeasePolicy,
 }
 
 impl Default for FilesystemPolicy {
@@ -97,6 +114,7 @@ impl Default for FilesystemPolicy {
             mounts: Vec::new(),
             protected_roots: Vec::new(),
             temp_bytes: default_temp_bytes(),
+            lease: FilesystemLeasePolicy::default(),
         }
     }
 }
@@ -285,6 +303,11 @@ pub enum ClientMessage {
         request_id: String,
         sandbox_id: String,
     },
+    RevokeAuthorization {
+        request_id: String,
+        tenant_id: String,
+        authorization_id: String,
+    },
     Shutdown {
         request_id: String,
     },
@@ -364,6 +387,10 @@ pub enum ServerMessage {
     SandboxClosed {
         request_id: String,
         sandbox_id: String,
+    },
+    AuthorizationRevoked {
+        request_id: String,
+        authorization_id: String,
     },
     ShutdownAck {
         request_id: String,

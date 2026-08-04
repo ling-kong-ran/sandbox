@@ -64,7 +64,14 @@
               "items": { "type": "string", "minLength": 1 },
               "uniqueItems": true
             },
-            "tempBytes": { "type": "integer", "minimum": 1 }
+            "tempBytes": { "type": "integer", "minimum": 1 },
+            "lease": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "mode": { "enum": ["ephemeral", "persistent"], "default": "ephemeral" }
+              }
+            }
           }
         },
         "network": {
@@ -265,6 +272,17 @@
         {
           "type": "object",
           "additionalProperties": false,
+          "required": ["type", "requestId", "tenantId", "authorizationId"],
+          "properties": {
+            "type": { "const": "revokeAuthorization" },
+            "requestId": { "$ref": "#/$defs/identifier" },
+            "tenantId": { "$ref": "#/$defs/identifier" },
+            "authorizationId": { "$ref": "#/$defs/identifier" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
           "required": ["type", "requestId"],
           "properties": {
             "type": { "const": "shutdown" },
@@ -365,6 +383,16 @@
             "type": { "const": "sandboxClosed" },
             "requestId": { "$ref": "#/$defs/identifier" },
             "sandboxId": { "$ref": "#/$defs/identifier" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "requestId", "authorizationId"],
+          "properties": {
+            "type": { "const": "authorizationRevoked" },
+            "requestId": { "$ref": "#/$defs/identifier" },
+            "authorizationId": { "$ref": "#/$defs/identifier" }
           }
         },
         {
