@@ -24,6 +24,9 @@ export interface SandboxPolicy {
   }
   network?: { mode: 'deny' | 'host' }
   environment?: { inherit?: string[]; allowSet?: string[] }
+  execution?: {
+    executables?: Array<{ alias: string; path: string; sha256: string }>
+  }
   limits?: {
     wallTimeMs?: number
     cpuTimeMs?: number

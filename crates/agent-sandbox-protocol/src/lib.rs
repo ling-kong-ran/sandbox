@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 pub const PROTOCOL_MAJOR: u16 = 1;
-pub const PROTOCOL_MINOR: u16 = 1;
+pub const PROTOCOL_MINOR: u16 = 2;
 pub const MAX_CONTROL_MESSAGE_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,6 +145,21 @@ pub struct EnvironmentPolicy {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExecutablePolicy {
+    pub alias: String,
+    pub path: String,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExecutionPolicy {
+    #[serde(default)]
+    pub executables: Vec<ExecutablePolicy>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ResourceLimits {
     #[serde(default = "default_wall_time_ms")]
     pub wall_time_ms: u64,
@@ -182,6 +197,8 @@ pub struct SandboxPolicy {
     pub network: NetworkPolicy,
     #[serde(default)]
     pub environment: EnvironmentPolicy,
+    #[serde(default)]
+    pub execution: ExecutionPolicy,
     #[serde(default)]
     pub limits: ResourceLimits,
 }

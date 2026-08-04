@@ -121,12 +121,26 @@ const sandbox = await client.createSandbox({
           source: 'C:\\code\\project',
           access: 'read-write',
         },
+        {
+          name: 'host-toolchain',
+          source: 'C:\\verified-toolchain',
+          access: 'read-only',
+        },
       ],
       protectedRoots: [],
       tempBytes: 64 * 1024 * 1024,
     },
     network: { mode: 'deny' },
     environment: { inherit: [], allowSet: ['CI'] },
+    execution: {
+      executables: [
+        {
+          alias: 'host-shell',
+          path: 'C:\\verified-toolchain\\host-shell.exe',
+          sha256: verifiedShellSha256,
+        },
+      ],
+    },
     limits: {
       wallTimeMs: 60_000,
       cpuTimeMs: 45_000,
@@ -138,7 +152,7 @@ const sandbox = await client.createSandbox({
 })
 
 const result = await sandbox.exec({
-  command: { kind: 'shell', shell: 'default', script: 'echo sandboxed' },
+  command: { kind: 'exec', program: 'host-shell', args: ['-c', 'echo sandboxed'] },
   cwd: { mount: 'workspace', path: '.' },
   env: { CI: '1' },
   onOutput({ stream, bytes }) {
@@ -157,16 +171,17 @@ The SDK requires an absolute daemon path and can verify a SHA-256 digest. It fil
 - A policy must contain one to sixteen directory mounts.
 - Mount sources must be absolute, existing directories and cannot overlap a declared protected root.
 - Mount-source path components cannot be symbolic links or Windows reparse points.
-- `filesystem.lease.mode: persistent` enrolls an empty managed directory under a stable `tenantId` and `authorizationId`; subsequent sandboxes reuse that exact mount/access authorization without walking the tree.
-- Persistent enrollment is intentionally rejected for a non-empty unregistered directory. Hosts must enroll before cloning or creating project files.
+- `filesystem.lease.mode: persistent` enrolls empty read-write managed directories under a stable `tenantId` and `authorizationId`; non-empty read-only toolchain mounts are allowed and can be upgraded without walking the workspace.
+- Persistent enrollment is intentionally rejected for a non-empty unregistered read-write directory. Hosts must enroll before cloning or creating project files.
 - Execution cwd is a logical mount plus a relative path; absolute paths and `..` are rejected.
-- `exec.program` is a bare name resolved from a trusted absolute PATH entry.
-- `shell` uses the backend's trusted default shell.
+- `execution.executables` binds a host-selected alias to a canonical executable inside a read-only mount and pins its SHA-256 digest.
+- `exec.program` references an executable alias. The runtime validates and resolves that declaration; it does not discover host tools from `PATH`.
+- `shell` remains the backend's minimal default shell for compatibility. Host integrations should prefer explicit executable aliases.
 - Sensitive keys such as API keys, tokens, passwords, private keys, loader injection variables, and cloud credentials cannot be inherited or set.
 - Output, stdin chunks, scripts, identifiers, and control messages have hard size limits.
 - `restrictPolicy()` computes monotonic policy intersections for host adapters; the daemon still validates the resulting policy.
 
-The names `node-default`, `python-default`, and `rust-default` are reserved trusted profile IDs in protocol v1. Toolchain-root discovery and read-only ACL projection are not complete yet; only `system-minimal` is covered by the current real conformance test.
+The names `node-default`, `python-default`, and `rust-default` are reserved trusted profile IDs in protocol v1. Hosts own toolchain selection; the runtime only validates explicit executable declarations and projects their read-only mounts.
 
 ## Protocol
 

@@ -1,5 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::SystemTime;
 
 use agent_sandbox_protocol::{
     CommandSpec, ErrorCategory, ExecutionLimits, LogicalPath, MountAccess, ProtocolError,
@@ -10,6 +13,7 @@ use thiserror::Error;
 
 const MAX_MOUNTS: usize = 16;
 const MAX_ENV_KEYS: usize = 128;
+const MAX_EXECUTABLES: usize = 16;
 const MAX_ENV_VALUE_BYTES: usize = 64 * 1024;
 const MAX_SCRIPT_BYTES: usize = 1024 * 1024;
 const MAX_MEMORY_BYTES: u64 = 64 * 1024 * 1024 * 1024;
@@ -17,6 +21,16 @@ const MAX_OUTPUT_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_TEMP_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 const MAX_PROCESSES: u32 = 4096;
 const MAX_WALL_TIME_MS: u64 = 24 * 60 * 60 * 1000;
+
+#[derive(Clone)]
+struct ExecutableDigestCacheEntry {
+    bytes: u64,
+    modified: Option<SystemTime>,
+    sha256: String,
+}
+
+static EXECUTABLE_DIGEST_CACHE: OnceLock<Mutex<BTreeMap<PathBuf, ExecutableDigestCacheEntry>>> =
+    OnceLock::new();
 
 #[derive(Debug, Error)]
 pub enum SandboxError {
@@ -78,9 +92,17 @@ pub struct ValidatedMount {
 }
 
 #[derive(Debug, Clone)]
+pub struct ValidatedExecutable {
+    pub alias: String,
+    pub path: PathBuf,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct ValidatedPolicy {
     pub original: SandboxPolicy,
     pub mounts: BTreeMap<String, ValidatedMount>,
+    pub executables: BTreeMap<String, ValidatedExecutable>,
     pub allowed_environment: BTreeSet<String>,
     pub inherited_environment: BTreeMap<String, String>,
     pub fingerprint: String,
@@ -167,6 +189,72 @@ impl ValidatedPolicy {
             );
         }
 
+        if policy.execution.executables.len() > MAX_EXECUTABLES {
+            return Err(SandboxError::InvalidPolicy(format!(
+                "execution executables cannot contain more than {MAX_EXECUTABLES} entries"
+            )));
+        }
+        let mut executables = BTreeMap::new();
+        for executable in &policy.execution.executables {
+            validate_mount_name(&executable.alias)?;
+            if executables.contains_key(&executable.alias) {
+                return Err(SandboxError::InvalidPolicy(format!(
+                    "duplicate executable alias: {}",
+                    executable.alias
+                )));
+            }
+            let requested = PathBuf::from(&executable.path);
+            if !requested.is_absolute() {
+                return Err(SandboxError::InvalidPolicy(format!(
+                    "executable {} path must be absolute",
+                    executable.alias
+                )));
+            }
+            reject_link_components(&requested)?;
+            let path = std::fs::canonicalize(&requested).map_err(|error| {
+                SandboxError::InvalidPolicy(format!(
+                    "executable {} is unavailable: {error}",
+                    executable.alias
+                ))
+            })?;
+            if !path.is_file() {
+                return Err(SandboxError::InvalidPolicy(format!(
+                    "executable {} path must be a file",
+                    executable.alias
+                )));
+            }
+            if !mounts.values().any(|mount| {
+                mount.access == MountAccess::ReadOnly && path_is_within(&path, &mount.source)
+            }) {
+                return Err(SandboxError::InvalidPolicy(format!(
+                    "executable {} must be contained by a read-only mount",
+                    executable.alias
+                )));
+            }
+            let expected = executable.sha256.to_ascii_lowercase();
+            if expected.len() != 64 || !expected.bytes().all(|value| value.is_ascii_hexdigit()) {
+                return Err(SandboxError::InvalidPolicy(format!(
+                    "executable {} sha256 must contain 64 hexadecimal characters",
+                    executable.alias
+                )));
+            }
+            let actual = sha256_file(&path)?;
+            if actual != expected {
+                return Err(SandboxError::InvalidPolicy(format!(
+                    "executable {} sha256 does not match",
+                    executable.alias
+                )));
+            }
+            executables.insert(
+                executable.alias.clone(),
+                ValidatedExecutable {
+                    alias: executable.alias.clone(),
+                    path,
+                    sha256: actual,
+                },
+            );
+        }
+
         let allowed_environment = validate_environment_keys(&policy.environment.allow_set)?;
         let inherited_keys = validate_environment_keys(&policy.environment.inherit)?;
         let mut inherited_environment = BTreeMap::new();
@@ -184,6 +272,7 @@ impl ValidatedPolicy {
         Ok(Self {
             original: policy,
             mounts,
+            executables,
             allowed_environment,
             inherited_environment,
             fingerprint,
@@ -207,31 +296,32 @@ impl ValidatedPolicy {
             format!("{}/{}", mount.destination, relative.replace('\\', "/"))
         };
 
-        match &command {
+        let command = match command {
             CommandSpec::Exec { program, args } => {
-                if program.is_empty()
-                    || program.contains('\0')
-                    || program.contains('/')
-                    || program.contains('\\')
-                {
-                    return Err(SandboxError::InvalidPolicy(
-                        "exec program must be a bare executable name".into(),
-                    ));
-                }
                 if args.iter().any(|arg| arg.contains('\0')) {
                     return Err(SandboxError::InvalidPolicy(
                         "exec arguments cannot contain NUL".into(),
                     ));
                 }
+                let executable = self.executables.get(&program).ok_or_else(|| {
+                    SandboxError::InvalidPolicy(format!(
+                        "exec program references unknown executable alias: {program}"
+                    ))
+                })?;
+                CommandSpec::Exec {
+                    program: executable.path.to_string_lossy().into_owned(),
+                    args,
+                }
             }
-            CommandSpec::Shell { script, .. } => {
+            CommandSpec::Shell { shell, script } => {
                 if script.is_empty() || script.len() > MAX_SCRIPT_BYTES || script.contains('\0') {
                     return Err(SandboxError::InvalidPolicy(
                         "shell script is empty, too large, or contains NUL".into(),
                     ));
                 }
+                CommandSpec::Shell { shell, script }
             }
-        }
+        };
 
         let mut effective_environment = self.inherited_environment.clone();
         for (name, value) in environment {
@@ -459,6 +549,61 @@ fn is_reparse_point(_metadata: &std::fs::Metadata) -> bool {
     false
 }
 
+fn sha256_file(path: &Path) -> Result<String, SandboxError> {
+    let metadata = std::fs::metadata(path).map_err(|error| {
+        SandboxError::InvalidPolicy(format!("cannot inspect executable for sha256: {error}"))
+    })?;
+    let modified = metadata.modified().ok();
+    let cache = EXECUTABLE_DIGEST_CACHE.get_or_init(|| Mutex::new(BTreeMap::new()));
+    if let Ok(entries) = cache.lock()
+        && let Some(entry) = entries.get(path)
+        && entry.bytes == metadata.len()
+        && entry.modified == modified
+    {
+        return Ok(entry.sha256.clone());
+    }
+
+    let mut file = std::fs::File::open(path).map_err(|error| {
+        SandboxError::InvalidPolicy(format!("cannot read executable for sha256: {error}"))
+    })?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(|error| {
+            SandboxError::InvalidPolicy(format!("cannot hash executable: {error}"))
+        })?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    let sha256 = hex::encode(digest.finalize());
+    if let Ok(mut entries) = cache.lock() {
+        entries.insert(
+            path.to_path_buf(),
+            ExecutableDigestCacheEntry {
+                bytes: metadata.len(),
+                modified,
+                sha256: sha256.clone(),
+            },
+        );
+    }
+    Ok(sha256)
+}
+
+fn path_is_within(path: &Path, root: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let path = path.to_string_lossy().to_lowercase();
+        let root = root.to_string_lossy().to_lowercase();
+        path == root || path.starts_with(&format!("{root}{}", std::path::MAIN_SEPARATOR))
+    }
+    #[cfg(not(windows))]
+    {
+        path.starts_with(root)
+    }
+}
+
 fn paths_overlap(left: &Path, right: &Path) -> bool {
     #[cfg(windows)]
     {
@@ -502,6 +647,7 @@ mod tests {
                 inherit: Vec::new(),
                 allow_set: vec!["CI".into()],
             },
+            execution: Default::default(),
             limits: ResourceLimits::default(),
         }
     }

@@ -4,7 +4,7 @@ import { isAbsolute } from 'node:path'
 import { spawn as spawnChild } from 'node:child_process'
 
 const PROTOCOL_MAJOR = 1
-const PROTOCOL_MINOR = 0
+const PROTOCOL_MINOR = 2
 const MAX_LINE_BYTES = 1024 * 1024
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000
 
@@ -520,6 +520,21 @@ export function restrictPolicy(grant, ...restrictions) {
     if (value.network?.mode) {
       policy.network.mode = stricterNetwork(policy.network.mode, value.network.mode)
       provenance.push({ field: 'network.mode', source })
+    }
+    if (value.execution?.executables) {
+      const allowed = new Map(
+        value.execution.executables.map((executable) => [executable.alias, executable]),
+      )
+      policy.execution ||= { executables: [] }
+      policy.execution.executables = (policy.execution.executables || []).filter((executable) => {
+        const candidate = allowed.get(executable.alias)
+        return (
+          candidate &&
+          candidate.path === executable.path &&
+          candidate.sha256.toLowerCase() === executable.sha256.toLowerCase()
+        )
+      })
+      provenance.push({ field: 'execution.executables', source })
     }
     for (const field of ['inherit', 'allowSet']) {
       if (value.environment?.[field]) {

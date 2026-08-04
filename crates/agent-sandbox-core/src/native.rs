@@ -341,6 +341,8 @@ mod windows_backend {
         capability_sid: String,
         policy_fingerprint: String,
         mounts: Vec<PersistentMount>,
+        #[serde(default)]
+        previous_mounts: Vec<PersistentMount>,
     }
 
     pub fn probe() -> Result<(), SandboxError> {
@@ -456,18 +458,19 @@ mod windows_backend {
                     "cannot read persistent authorization: {error}"
                 ))
             })?;
-            let record: PersistentAuthorization =
+            let mut record: PersistentAuthorization =
                 serde_json::from_slice(&bytes).map_err(|error| {
                     SandboxError::BackendUnavailable(format!(
                         "invalid persistent authorization: {error}"
                     ))
                 })?;
-            if record.version != 1
+            if !matches!(record.version, 1..=3)
                 || !record.capability_name.starts_with("agent.sandbox.")
                 || !record.capability_sid.starts_with("S-1-15-2-")
                 || record
                     .mounts
                     .iter()
+                    .chain(record.previous_mounts.iter())
                     .any(|mount| !mount.source.is_absolute())
             {
                 return Err(SandboxError::BackendUnavailable(
@@ -476,6 +479,9 @@ mod windows_backend {
             }
             match record.state.as_str() {
                 "active" => continue,
+                "upgrading" => {
+                    complete_persistent_authorization_upgrade(&entry.path(), &mut record).await?;
+                }
                 "preparing" => {
                     for mount in record.mounts.iter().rev() {
                         let source = mount.source.clone();
@@ -516,6 +522,53 @@ mod windows_backend {
                 }
             }
         }
+        Ok(())
+    }
+
+    async fn complete_persistent_authorization_upgrade(
+        path: &Path,
+        record: &mut PersistentAuthorization,
+    ) -> Result<(), SandboxError> {
+        for mount in &record.mounts {
+            let source = mount.source.clone();
+            let sid = record.capability_sid.clone();
+            let mask = mount_access_mask(mount.access);
+            tokio::task::spawn_blocking(move || windows_acl::grant_root(&source, &sid, mask))
+                .await
+                .map_err(|error| {
+                    SandboxError::CapabilityUnavailable(format!(
+                        "persistent authorization upgrade task failed: {error}"
+                    ))
+                })??;
+        }
+        for mount in record.previous_mounts.iter().rev() {
+            if record.mounts.contains(mount) {
+                continue;
+            }
+            let source = mount.source.clone();
+            let sid = record.capability_sid.clone();
+            tokio::task::spawn_blocking(move || windows_acl::revoke_root(&source, &sid))
+                .await
+                .map_err(|error| {
+                    SandboxError::CapabilityUnavailable(format!(
+                        "persistent authorization upgrade cleanup failed: {error}"
+                    ))
+                })??;
+        }
+        record.version = 3;
+        record.state = "active".into();
+        record.previous_mounts.clear();
+        tokio::fs::write(
+            path,
+            serde_json::to_vec(record)
+                .map_err(|error| SandboxError::Internal(error.to_string()))?,
+        )
+        .await
+        .map_err(|error| {
+            SandboxError::BackendUnavailable(format!(
+                "cannot complete persistent authorization upgrade: {error}"
+            ))
+        })?;
         Ok(())
     }
 
@@ -661,26 +714,59 @@ mod windows_backend {
             })?;
         let path = directory.join(format!("{authorization_hash}.json"));
         if let Ok(bytes) = tokio::fs::read(&path).await {
-            let record: PersistentAuthorization =
+            let mut record: PersistentAuthorization =
                 serde_json::from_slice(&bytes).map_err(|error| {
                     SandboxError::BackendUnavailable(format!(
                         "invalid persistent authorization record: {error}"
                     ))
                 })?;
-            if record.version != 1
+            let current_writable: Vec<_> = record
+                .mounts
+                .iter()
+                .filter(|mount| mount.access == MountAccess::ReadWrite)
+                .collect();
+            let requested_writable: Vec<_> = mounts
+                .iter()
+                .filter(|mount| mount.access == MountAccess::ReadWrite)
+                .collect();
+            if !matches!(record.version, 1..=3)
                 || record.state != "active"
                 || record.capability_name != capability_name
                 || record.capability_sid != capability_sid
+                || current_writable != requested_writable
+            {
+                return Err(SandboxError::InvalidPolicy(
+                    "persistent authorization does not match the requested writable workspace policy"
+                        .into(),
+                ));
+            }
+            if record.version != 3
                 || record.policy_fingerprint != policy_fingerprint
                 || record.mounts != mounts
             {
-                return Err(SandboxError::InvalidPolicy(
-                    "persistent authorization does not match the requested workspace policy".into(),
-                ));
+                record.version = 3;
+                record.state = "upgrading".into();
+                record.policy_fingerprint = policy_fingerprint;
+                record.previous_mounts = std::mem::replace(&mut record.mounts, mounts);
+                tokio::fs::write(
+                    &path,
+                    serde_json::to_vec(&record)
+                        .map_err(|error| SandboxError::Internal(error.to_string()))?,
+                )
+                .await
+                .map_err(|error| {
+                    SandboxError::BackendUnavailable(format!(
+                        "cannot journal persistent authorization upgrade: {error}"
+                    ))
+                })?;
+                complete_persistent_authorization_upgrade(&path, &mut record).await?;
             }
             return Ok(());
         }
-        for mount in &mounts {
+        for mount in mounts
+            .iter()
+            .filter(|mount| mount.access == MountAccess::ReadWrite)
+        {
             let mut entries = tokio::fs::read_dir(&mount.source).await.map_err(|error| {
                 SandboxError::CapabilityUnavailable(format!(
                     "cannot inspect managed workspace before enrollment: {error}"
@@ -702,12 +788,13 @@ mod windows_backend {
             }
         }
         let mut record = PersistentAuthorization {
-            version: 1,
+            version: 3,
             state: "preparing".into(),
             capability_name: capability_name.clone(),
             capability_sid: capability_sid.clone(),
             policy_fingerprint,
             mounts,
+            previous_mounts: Vec::new(),
         };
         tokio::fs::write(
             &path,
@@ -783,21 +870,27 @@ mod windows_backend {
                 "invalid persistent authorization for revocation: {error}"
             ))
         })?;
-        if record.version != 1
+        if !matches!(record.version, 1..=3)
             || record.state != "active"
             || !record.capability_name.starts_with("agent.sandbox.")
             || !record.capability_sid.starts_with("S-1-15-2-")
             || record
                 .mounts
                 .iter()
+                .chain(record.previous_mounts.iter())
                 .any(|mount| !mount.source.is_absolute())
         {
             return Err(SandboxError::BackendUnavailable(
                 "persistent authorization failed revocation integrity validation".into(),
             ));
         }
-        for mount in record.mounts.iter().rev() {
-            let source = mount.source.clone();
+        let mounts: std::collections::BTreeSet<_> = record
+            .mounts
+            .iter()
+            .chain(record.previous_mounts.iter())
+            .map(|mount| mount.source.clone())
+            .collect();
+        for source in mounts.into_iter().rev() {
             let sid = record.capability_sid.clone();
             tokio::task::spawn_blocking(move || windows_acl::revoke_root(&source, &sid))
                 .await
@@ -827,11 +920,17 @@ mod windows_backend {
     }
 
     fn mount_access_mask(access: MountAccess) -> u32 {
-        use windows::Win32::Storage::FileSystem::{FILE_GENERIC_READ, FILE_GENERIC_WRITE};
+        use windows::Win32::Storage::FileSystem::{
+            FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+        };
         match access {
-            MountAccess::ReadOnly => FILE_GENERIC_READ.0,
+            MountAccess::ReadOnly => FILE_GENERIC_READ.0 | FILE_GENERIC_EXECUTE.0,
             MountAccess::ReadWrite => {
-                FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0 | 0x0001_0000 | 0x0000_0040
+                FILE_GENERIC_READ.0
+                    | FILE_GENERIC_WRITE.0
+                    | FILE_GENERIC_EXECUTE.0
+                    | 0x0001_0000
+                    | 0x0000_0040
             }
         }
     }
@@ -1033,6 +1132,12 @@ mod windows_backend {
         program: &str,
         environment: &BTreeMap<String, String>,
     ) -> Result<PathBuf, SandboxError> {
+        let requested = Path::new(program);
+        if requested.is_absolute() {
+            return std::fs::canonicalize(requested)
+                .map(to_win32_process_path)
+                .map_err(|error| SandboxError::Process(error.to_string()));
+        }
         let path = environment
             .get("PATH")
             .cloned()

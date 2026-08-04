@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
-import { access, mkdir, readFile, rm } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { access, copyFile, mkdir, readFile, rm } from 'node:fs/promises'
 import { performance } from 'node:perf_hooks'
 import { resolve } from 'node:path'
 import test from 'node:test'
@@ -10,6 +11,7 @@ const daemon = resolve('target/debug/agent-sandboxd.exe')
 const root = resolve('target/native-persistent-test')
 const workspace = resolve(root, 'workspace')
 const stateDirectory = resolve(root, 'state')
+const toolchain = resolve(root, 'toolchain')
 
 async function exists(path) {
   try {
@@ -20,7 +22,7 @@ async function exists(path) {
   }
 }
 
-function request(authorizationId) {
+function request(authorizationId, executable = null) {
   return {
     tenantId: 'persistent-tenant',
     profile: 'system-minimal',
@@ -29,13 +31,23 @@ function request(authorizationId) {
       schemaVersion: 1,
       backend: 'native',
       filesystem: {
-        mounts: [{ name: 'workspace', source: workspace, access: 'read-write' }],
+        mounts: [
+          { name: 'workspace', source: workspace, access: 'read-write' },
+          ...(executable
+            ? [{ name: 'toolchain', source: toolchain, access: 'read-only' }]
+            : []),
+        ],
         protectedRoots: [],
         tempBytes: 64 * 1024 * 1024,
         lease: { mode: 'persistent' },
       },
       network: { mode: 'deny' },
       environment: { inherit: [], allowSet: [] },
+      execution: {
+        executables: executable
+          ? [{ alias: 'test-runtime', path: executable.path, sha256: executable.sha256 }]
+          : [],
+      },
       limits: {
         wallTimeMs: 10_000,
         cpuTimeMs: 5_000,
@@ -80,13 +92,34 @@ test('Windows persistent workspace authorization survives daemon restart', async
   }
   assert.match(await readFile(resolve(workspace, 'created.txt'), 'utf8'), /persistent/)
 
+  await mkdir(toolchain)
+  const toolchainExecutable = resolve(toolchain, 'test-runtime.exe')
+  await copyFile(daemon, toolchainExecutable)
+  const executable = {
+    path: toolchainExecutable,
+    sha256: createHash('sha256').update(await readFile(toolchainExecutable)).digest('hex'),
+  }
+
   runtime = await client()
   try {
     const started = performance.now()
-    const sandbox = await runtime.createSandbox(request('workspace-one'))
+    const sandbox = await runtime.createSandbox(request('workspace-one', executable))
     const elapsedMs = performance.now() - started
-    assert.ok(elapsedMs < 1_000, `persistent sandbox initialization took ${elapsedMs} ms`)
+    assert.ok(elapsedMs < 3_000, `persistent toolchain migration took ${elapsedMs} ms`)
+    const output = []
+    const executed = await sandbox.exec({
+      command: { kind: 'exec', program: 'test-runtime', args: ['probe', '--json'] },
+      cwd: { mount: 'workspace', path: '.' },
+      onOutput: ({ bytes }) => output.push(bytes),
+    })
+    assert.equal(executed.exitCode, 0)
+    assert.match(Buffer.concat(output).toString('utf8'), /windows-appcontainer/)
     await sandbox.close()
+    const stableStarted = performance.now()
+    const stable = await runtime.createSandbox(request('workspace-one', executable))
+    const stableElapsedMs = performance.now() - stableStarted
+    assert.ok(stableElapsedMs < 1_000, `stable toolchain reuse took ${stableElapsedMs} ms`)
+    await stable.close()
     await assert.rejects(
       runtime.createSandbox(request('workspace-two')),
       /empty managed directory/i,

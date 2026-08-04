@@ -97,6 +97,31 @@
             }
           }
         },
+        "execution": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "executables": {
+              "type": "array",
+              "maxItems": 16,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["alias", "path", "sha256"],
+                "properties": {
+                  "alias": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "pattern": "^[A-Za-z0-9_-]+$"
+                  },
+                  "path": { "type": "string", "minLength": 1 },
+                  "sha256": { "type": "string", "pattern": "^[A-Fa-f0-9]{64}$" }
+                }
+              }
+            }
+          }
+        },
         "limits": { "$ref": "#/$defs/resourceLimits" }
       }
     },
