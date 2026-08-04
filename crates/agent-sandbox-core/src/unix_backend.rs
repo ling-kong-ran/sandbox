@@ -45,7 +45,7 @@ pub(crate) fn report() -> CapabilityReport {
     features.insert("filesystemReadBoundary".into(), FeatureState::Enforced);
     features.insert("filesystemWriteBoundary".into(), FeatureState::Enforced);
     features.insert("networkDeny".into(), FeatureState::Enforced);
-    features.insert("processTree".into(), FeatureState::Enforced);
+    features.insert("processTree".into(), FeatureState::Limited);
     features.insert(
         "memoryLimit".into(),
         if cfg!(target_os = "linux") {
@@ -68,6 +68,7 @@ pub(crate) fn report() -> CapabilityReport {
         status: EnforcementStatus::Limited,
         features,
         reasons: vec![
+            "process groups do not prevent descendants from creating a new session".into(),
             "per-user process count cannot be isolated without a privileged PID namespace".into(),
         ],
     }
@@ -253,6 +254,11 @@ fn runtime_read_paths(
         "/lib64",
         "/usr/lib",
         "/usr/lib64",
+        "/System/Library",
+        "/Library/Apple",
+        "/etc/ssl",
+        "/etc/pki",
+        "/etc/ca-certificates",
     ] {
         let path = PathBuf::from(path);
         if path.exists() {
@@ -420,12 +426,38 @@ fn apply_macos_sandbox(
     write_paths: &[PathBuf],
     deny_network: bool,
 ) -> std::io::Result<()> {
-    let mut profile =
-        String::from("(version 1)\n(deny default)\n(allow process*)\n(allow file-read-metadata)\n");
+    let mut profile = String::from(
+        "(version 1)\n\
+         (deny default)\n\
+         (allow process-exec*)\n\
+         (allow process-fork)\n\
+         (allow process-info* (target self))\n\
+         (allow process-info* (target same-sandbox))\n\
+         (allow signal (target self))\n\
+         (allow signal (target same-sandbox))\n\
+         (allow sysctl-read)\n\
+         (allow mach-lookup)\n\
+         (deny mach-lookup (global-name \"com.apple.SecurityServer\"))\n\
+         (deny mach-lookup (global-name \"com.apple.securityd\"))\n\
+         (deny mach-lookup (global-name \"com.apple.security.keychaind\"))\n\
+         (deny mach-lookup (global-name \"com.apple.secd\"))\n\
+         (deny mach-lookup (global-name \"com.apple.security.agent\"))\n\
+         (allow mach-per-user-lookup)\n\
+         (allow mach-task-name)\n\
+         (deny mach-priv*)\n\
+         (allow ipc-posix-shm-read-data)\n\
+         (allow ipc-posix-shm-write-data)\n\
+         (allow ipc-posix-shm-write-create)\n\
+         (allow system-fsctl)\n\
+         (allow system-info)\n\
+         (allow file-read-metadata)\n\
+         (allow file-read* (literal \"/\"))\n",
+    );
     for path in read_paths {
+        let path = seatbelt_escape(path)?;
         profile.push_str(&format!(
-            "(allow file-read* (subpath \"{}\"))\n",
-            seatbelt_escape(path)?
+            "(allow file-read* (subpath \"{path}\"))\n\
+             (allow file-map-executable (subpath \"{path}\"))\n"
         ));
     }
     for path in write_paths {
