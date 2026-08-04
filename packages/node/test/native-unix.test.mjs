@@ -38,38 +38,49 @@ test('Unix native backend confines arbitrary executables and denies network acce
   try {
     const report = await client.probe()
     assert.match(report.backend, /landlock|seatbelt/)
-    assert.equal(report.features.filesystemReadBoundary, 'enforced')
-    assert.equal(report.features.networkDeny, 'enforced')
+    assert.equal(report.status, 'enforced')
+    for (const feature of [
+      'filesystemReadBoundary',
+      'filesystemWriteBoundary',
+      'networkDeny',
+      'processTree',
+      'memoryLimit',
+      'cpuLimit',
+      'processLimit',
+    ]) {
+      assert.equal(report.features[feature], 'enforced', feature)
+    }
 
+    const sandboxPolicy = {
+      schemaVersion: 1,
+      backend: 'native',
+      filesystem: {
+        mounts: [
+          { name: 'workspace', source: workspace, access: 'read-write' },
+          { name: 'node-runtime', source: dirname(executable), access: 'read-only' },
+        ],
+        protectedRoots: [],
+        tempBytes: 64 * 1024 * 1024,
+        lease: { mode: 'ephemeral' },
+      },
+      network: { mode: 'deny' },
+      environment: { inherit: ['PATH'], allowSet: [] },
+      execution: {
+        executables: [{ alias: 'node', path: executable, sha256 }],
+      },
+      limits: {
+        wallTimeMs: 15_000,
+        cpuTimeMs: 10_000,
+        memoryBytes: 512 * 1024 * 1024,
+        processes: 16,
+        outputBytes: 1024 * 1024,
+      },
+    }
     const sandbox = await client.createSandbox({
       tenantId: 'unix-conformance',
       profile: 'system-minimal',
       authorizationId: 'arbitrary-node',
-      policy: {
-        schemaVersion: 1,
-        backend: 'native',
-        filesystem: {
-          mounts: [
-            { name: 'workspace', source: workspace, access: 'read-write' },
-            { name: 'node-runtime', source: dirname(executable), access: 'read-only' },
-          ],
-          protectedRoots: [],
-          tempBytes: 64 * 1024 * 1024,
-          lease: { mode: 'ephemeral' },
-        },
-        network: { mode: 'deny' },
-        environment: { inherit: ['PATH'], allowSet: [] },
-        execution: {
-          executables: [{ alias: 'node', path: executable, sha256 }],
-        },
-        limits: {
-          wallTimeMs: 15_000,
-          cpuTimeMs: 10_000,
-          memoryBytes: 512 * 1024 * 1024,
-          processes: 16,
-          outputBytes: 1024 * 1024,
-        },
-      },
+      policy: sandboxPolicy,
     })
 
     let output = ''
@@ -106,6 +117,75 @@ test('Unix native backend confines arbitrary executables and denies network acce
     })
     assert.equal(await readFile(join(workspace, 'created.txt'), 'utf8'), 'created')
     await sandbox.close()
+
+    const memorySandbox = await client.createSandbox({
+      tenantId: 'unix-conformance',
+      profile: 'system-minimal',
+      authorizationId: 'memory-limit',
+      policy: {
+        ...sandboxPolicy,
+        limits: { ...sandboxPolicy.limits, memoryBytes: 96 * 1024 * 1024 },
+      },
+    })
+    const memoryResult = await memorySandbox.exec({
+      command: {
+        kind: 'exec',
+        program: 'node',
+        args: ['-e', "Buffer.alloc(256 * 1024 * 1024, 1); setTimeout(() => {}, 10_000)"],
+      },
+      cwd: { mount: 'workspace', path: '.' },
+    })
+    assert.notEqual(memoryResult.exitCode, 0)
+    await memorySandbox.close()
+
+    const processSandbox = await client.createSandbox({
+      tenantId: 'unix-conformance',
+      profile: 'system-minimal',
+      authorizationId: 'process-limit',
+      policy: {
+        ...sandboxPolicy,
+        limits: { ...sandboxPolicy.limits, processes: 4 },
+      },
+    })
+    const processResult = await processSandbox.exec({
+      command: {
+        kind: 'exec',
+        program: 'node',
+        args: [
+          '-e',
+          "const {spawn}=require('node:child_process'); for(let i=0;i<12;i++) spawn(process.execPath,['-e','setTimeout(()=>{},10000)']); setTimeout(()=>{},10000)",
+        ],
+      },
+      cwd: { mount: 'workspace', path: '.' },
+    })
+    assert.notEqual(processResult.exitCode, 0)
+    await processSandbox.close()
+
+    const treeSandbox = await client.createSandbox({
+      tenantId: 'unix-conformance',
+      profile: 'system-minimal',
+      authorizationId: 'process-tree',
+      policy: sandboxPolicy,
+    })
+    const controller = new AbortController()
+    const treeExecution = treeSandbox.exec({
+      command: {
+        kind: 'exec',
+        program: 'node',
+        args: [
+          '-e',
+          "const {spawn}=require('node:child_process'); const child=spawn(process.execPath,['-e',\"setTimeout(()=>require('node:fs').writeFileSync('escaped.txt','escaped'),1000)\"],{detached:true,stdio:'ignore'}); child.unref(); setTimeout(()=>{},10000)",
+        ],
+      },
+      cwd: { mount: 'workspace', path: '.' },
+      signal: controller.signal,
+    })
+    await new Promise((resolveWait) => setTimeout(resolveWait, 200))
+    controller.abort()
+    await treeExecution
+    await new Promise((resolveWait) => setTimeout(resolveWait, 1_500))
+    assert.equal(await exists(join(workspace, 'escaped.txt')), false)
+    await treeSandbox.close()
   } finally {
     await client.close().catch(() => {})
     await rm(root, { recursive: true, force: true })

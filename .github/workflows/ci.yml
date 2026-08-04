@@ -46,7 +46,11 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
           sudo mkdir -p "$AGENT_SANDBOX_CGROUP_ROOT"
-          sudo chown "$USER":"$(id -gn)" "$AGENT_SANDBOX_CGROUP_ROOT"
+          sudo chown "$USER":"$(id -gn)" \
+            "$AGENT_SANDBOX_CGROUP_ROOT" \
+            "$AGENT_SANDBOX_CGROUP_ROOT/cgroup.procs" \
+            "$AGENT_SANDBOX_CGROUP_ROOT/cgroup.subtree_control"
+          echo '+cpu +memory +pids' > "$AGENT_SANDBOX_CGROUP_ROOT/cgroup.subtree_control"
           test -f "$AGENT_SANDBOX_CGROUP_ROOT/cgroup.controllers"
       - run: cargo build --workspace
       - name: Provision Windows native sandbox
