@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 use agent_sandbox_protocol::{CapabilityReport, EnforcementStatus, FeatureState};
 #[cfg(windows)]
 use agent_sandbox_protocol::{CommandSpec, FilesystemLeaseMode, MountAccess, NetworkMode};
-#[cfg(windows)]
 use sha2::{Digest, Sha256};
 
 use crate::{SandboxError, ValidatedExecution, ValidatedPolicy};
@@ -43,6 +42,8 @@ pub struct PreparedSandbox {
     pub fingerprint: String,
     #[cfg(windows)]
     platform: windows_backend::PreparedWindowsSandbox,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    platform: crate::unix_backend::PreparedUnixSandbox,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -56,7 +57,12 @@ impl NativeBackend {
             windows_backend::recover_journals().await?;
             Ok(Self)
         }
-        #[cfg(not(windows))]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            crate::unix_backend::probe()?;
+            Ok(Self)
+        }
+        #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
         {
             Err(SandboxError::BackendUnavailable(format!(
                 "the native backend for {} is not implemented in this build",
@@ -70,7 +76,11 @@ impl NativeBackend {
         {
             windows_backend::report()
         }
-        #[cfg(not(windows))]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            crate::unix_backend::report()
+        }
+        #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
         {
             Self::unavailable_report(format!(
                 "the native backend for {} is not implemented in this build",
@@ -126,7 +136,25 @@ impl NativeBackend {
                 platform,
             })
         }
-        #[cfg(not(windows))]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            let platform = crate::unix_backend::prepare(sandbox_id, &policy).await?;
+            let report = self.report();
+            let mut digest = Sha256::new();
+            digest.update(policy.fingerprint.as_bytes());
+            digest.update(profile.id.as_bytes());
+            digest.update(std::env::consts::OS.as_bytes());
+            let fingerprint = format!("sha256:{}", hex::encode(digest.finalize()));
+            let _ = authorization;
+            Ok(PreparedSandbox {
+                policy,
+                profile,
+                report,
+                fingerprint,
+                platform,
+            })
+        }
+        #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
         {
             let _ = (sandbox_id, policy, profile, authorization);
             Err(SandboxError::BackendUnavailable(
@@ -145,7 +173,12 @@ impl NativeBackend {
         {
             windows_backend::spawn(sandbox, execution, stdin_pipe).await
         }
-        #[cfg(not(windows))]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            crate::unix_backend::spawn(&sandbox.policy, &sandbox.platform, execution, stdin_pipe)
+                .await
+        }
+        #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
         {
             let _ = (sandbox, execution, stdin_pipe);
             Err(SandboxError::BackendUnavailable(
@@ -162,7 +195,12 @@ impl NativeBackend {
         {
             windows_backend::revoke_persistent_authorization(authorization).await
         }
-        #[cfg(not(windows))]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            let _ = authorization;
+            Ok(())
+        }
+        #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
         {
             let _ = authorization;
             Err(SandboxError::BackendUnavailable(
@@ -176,7 +214,11 @@ impl NativeBackend {
         {
             windows_backend::cleanup(&sandbox.platform).await
         }
-        #[cfg(not(windows))]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            crate::unix_backend::cleanup(&sandbox.platform).await
+        }
+        #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
         {
             let _ = sandbox;
             Ok(())
@@ -188,21 +230,25 @@ pub struct NativeProcess {
     pub stdin: Option<tokio::fs::File>,
     pub stdout: Option<tokio::fs::File>,
     pub stderr: Option<tokio::fs::File>,
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     wait: tokio::task::JoinHandle<Result<i32, SandboxError>>,
     #[cfg(windows)]
     control: windows_backend::ProcessControl,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    control: crate::unix_backend::ProcessControl,
 }
 
 #[derive(Debug, Clone)]
 pub struct NativeProcessControl {
     #[cfg(windows)]
     platform: windows_backend::ProcessControl,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    platform: crate::unix_backend::ProcessControl,
 }
 
 impl NativeProcessControl {
     pub fn terminate(&self) {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
         self.platform.terminate();
     }
 }
@@ -210,19 +256,19 @@ impl NativeProcessControl {
 impl NativeProcess {
     pub fn control(&self) -> NativeProcessControl {
         NativeProcessControl {
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
             platform: self.control.clone(),
         }
     }
 
     pub async fn wait(self) -> Result<i32, SandboxError> {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
         {
             self.wait.await.map_err(|error| {
                 SandboxError::Process(format!("process wait task failed: {error}"))
             })?
         }
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
         {
             Err(SandboxError::BackendUnavailable(
                 "native backend unavailable".into(),
