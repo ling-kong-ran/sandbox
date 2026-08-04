@@ -301,9 +301,10 @@ fn probe_bwrap(bwrap: &Path) -> Result<(), SandboxError> {
 }
 
 fn cgroup_root() -> Result<PathBuf, SandboxError> {
-    let root = std::env::var_os("AGENT_SANDBOX_CGROUP_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/sys/fs/cgroup/agent-sandbox"));
+    let root = match std::env::var_os("AGENT_SANDBOX_CGROUP_ROOT") {
+        Some(path) if !path.is_empty() => PathBuf::from(path),
+        _ => current_cgroup_path()?,
+    };
     if root.is_dir() && root.join("cgroup.controllers").is_file() {
         Ok(root)
     } else {
@@ -312,6 +313,21 @@ fn cgroup_root() -> Result<PathBuf, SandboxError> {
             root.display()
         )))
     }
+}
+
+fn current_cgroup_path() -> Result<PathBuf, SandboxError> {
+    let value = std::fs::read_to_string("/proc/self/cgroup").map_err(|error| {
+        SandboxError::BackendUnavailable(format!("cannot inspect current cgroup: {error}"))
+    })?;
+    let relative = value
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))
+        .ok_or_else(|| {
+            SandboxError::BackendUnavailable(
+                "cannot discover the current unified cgroup v2 path".into(),
+            )
+        })?;
+    Ok(Path::new("/sys/fs/cgroup").join(relative.trim_start_matches('/')))
 }
 
 fn probe_cgroup(root: &Path) -> Result<(), SandboxError> {
