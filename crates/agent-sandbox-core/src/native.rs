@@ -240,6 +240,8 @@ mod windows_backend {
     use crate::windows_acl;
 
     const SYSTEM_CMD: &str = r"C:\Windows\System32\cmd.exe";
+    const ACL_STRATEGY_LEGACY_TREE: u8 = 0;
+    const ACL_STRATEGY_ROOT_INHERITED: u8 = 1;
 
     #[derive(Debug)]
     pub struct PreparedWindowsSandbox {
@@ -248,6 +250,7 @@ mod windows_backend {
         profile: AppContainerProfile,
         journal: PathBuf,
         mounts: Vec<PathBuf>,
+        acl_strategy: u8,
     }
 
     #[derive(Debug, Clone)]
@@ -269,6 +272,8 @@ mod windows_backend {
         profile_name: String,
         sid: String,
         mounts: Vec<PathBuf>,
+        #[serde(default)]
+        acl_strategy: u8,
     }
 
     pub fn probe() -> Result<(), SandboxError> {
@@ -336,7 +341,7 @@ mod windows_backend {
                 ));
             }
             for mount in record.mounts.iter().rev() {
-                revoke_mount(&record.sid, mount).await?;
+                revoke_mount(&record.sid, mount, record.acl_strategy).await?;
             }
             AppContainerProfile::ensure(
                 &record.profile_name,
@@ -393,6 +398,7 @@ mod windows_backend {
             profile_name: profile_name.clone(),
             sid: profile.sid.as_string().to_string(),
             mounts: mounts.clone(),
+            acl_strategy: ACL_STRATEGY_ROOT_INHERITED,
         };
         let bytes = serde_json::to_vec(&record)
             .map_err(|error| SandboxError::Internal(error.to_string()))?;
@@ -405,7 +411,7 @@ mod windows_backend {
             let result = grant_mount(&profile, &mount.source, mount.access).await;
             if let Err(error) = result {
                 for path in granted.iter().rev() {
-                    let _ = revoke_mount(&record.sid, path).await;
+                    let _ = revoke_mount(&record.sid, path, record.acl_strategy).await;
                 }
                 let _ = profile.delete();
                 let _ = tokio::fs::remove_file(&journal).await;
@@ -419,6 +425,7 @@ mod windows_backend {
             profile,
             journal,
             mounts,
+            acl_strategy: record.acl_strategy,
         })
     }
 
@@ -447,25 +454,31 @@ mod windows_backend {
         })?;
         if result.is_err() {
             let _ =
-                tokio::task::spawn_blocking(move || windows_acl::revoke_tree(&path, &sid)).await;
+                tokio::task::spawn_blocking(move || windows_acl::revoke_root(&path, &sid)).await;
         }
         result
     }
 
-    async fn revoke_mount(sid: &str, path: &Path) -> Result<(), SandboxError> {
+    async fn revoke_mount(sid: &str, path: &Path, acl_strategy: u8) -> Result<(), SandboxError> {
         let path = path.to_path_buf();
         let sid = sid.to_string();
-        tokio::task::spawn_blocking(move || windows_acl::revoke_tree(&path, &sid))
-            .await
-            .map_err(|error| {
-                SandboxError::CapabilityUnavailable(format!("ACL revoke task failed: {error}"))
-            })?
+        tokio::task::spawn_blocking(move || match acl_strategy {
+            ACL_STRATEGY_ROOT_INHERITED => windows_acl::revoke_root(&path, &sid),
+            ACL_STRATEGY_LEGACY_TREE => windows_acl::revoke_tree(&path, &sid),
+            _ => Err(SandboxError::CapabilityUnavailable(
+                "unknown ACL recovery strategy".into(),
+            )),
+        })
+        .await
+        .map_err(|error| {
+            SandboxError::CapabilityUnavailable(format!("ACL revoke task failed: {error}"))
+        })?
     }
 
     pub async fn cleanup(platform: &PreparedWindowsSandbox) -> Result<(), SandboxError> {
         let mut failures = Vec::new();
         for mount in platform.mounts.iter().rev() {
-            if let Err(error) = revoke_mount(&platform.sid, mount).await {
+            if let Err(error) = revoke_mount(&platform.sid, mount, platform.acl_strategy).await {
                 failures.push(error.to_string());
             }
         }
