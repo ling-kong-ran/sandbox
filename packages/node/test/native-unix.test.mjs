@@ -131,7 +131,10 @@ test('Unix native backend confines arbitrary executables and denies network acce
       command: {
         kind: 'exec',
         program: 'node',
-        args: ['-e', "Buffer.alloc(256 * 1024 * 1024, 1); setTimeout(() => {}, 10_000)"],
+        args: [
+          '-e',
+          "const chunks=[]; setInterval(()=>chunks.push(Buffer.alloc(8*1024*1024,1)),1)",
+        ],
       },
       cwd: { mount: 'workspace', path: '.' },
     })
