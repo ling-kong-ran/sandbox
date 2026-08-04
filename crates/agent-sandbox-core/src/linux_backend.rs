@@ -556,7 +556,7 @@ fn apply_landlock(read_paths: &[PathBuf], write_paths: &[PathBuf]) -> std::io::R
         .map_err(std::io::Error::other)?;
     let read_dir = (AccessFs::ReadFile | AccessFs::ReadDir | AccessFs::Execute) & handled;
     let read_file = (AccessFs::ReadFile | AccessFs::Execute) & handled;
-    let write = (read_dir
+    let write_dir = (read_dir
         | AccessFs::WriteFile
         | AccessFs::MakeChar
         | AccessFs::MakeDir
@@ -570,6 +570,7 @@ fn apply_landlock(read_paths: &[PathBuf], write_paths: &[PathBuf]) -> std::io::R
         | AccessFs::Refer
         | AccessFs::Truncate)
         & handled;
+    let write_file = (read_file | AccessFs::WriteFile | AccessFs::Truncate) & handled;
     for path in read_paths {
         let access = if path.is_dir() { read_dir } else { read_file };
         ruleset = ruleset
@@ -580,10 +581,11 @@ fn apply_landlock(read_paths: &[PathBuf], write_paths: &[PathBuf]) -> std::io::R
             .map_err(std::io::Error::other)?;
     }
     for path in write_paths {
+        let access = if path.is_dir() { write_dir } else { write_file };
         ruleset = ruleset
             .add_rule(PathBeneath::new(
                 PathFd::new(path).map_err(std::io::Error::other)?,
-                write,
+                access,
             ))
             .map_err(std::io::Error::other)?;
     }
