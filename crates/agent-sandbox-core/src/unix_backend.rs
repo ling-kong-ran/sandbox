@@ -46,14 +46,7 @@ pub(crate) fn report() -> CapabilityReport {
     features.insert("filesystemWriteBoundary".into(), FeatureState::Enforced);
     features.insert("networkDeny".into(), FeatureState::Enforced);
     features.insert("processTree".into(), FeatureState::Limited);
-    features.insert(
-        "memoryLimit".into(),
-        if cfg!(target_os = "linux") {
-            FeatureState::Enforced
-        } else {
-            FeatureState::Limited
-        },
-    );
+    features.insert("memoryLimit".into(), FeatureState::Limited);
     features.insert("cpuLimit".into(), FeatureState::Enforced);
     features.insert("processLimit".into(), FeatureState::Limited);
     features.insert("filesystemRpc".into(), FeatureState::Unavailable);
@@ -68,6 +61,8 @@ pub(crate) fn report() -> CapabilityReport {
         status: EnforcementStatus::Limited,
         features,
         reasons: vec![
+            "portable per-sandbox resident-memory limits require delegated OS resource controls"
+                .into(),
             "process groups do not prevent descendants from creating a new session".into(),
             "per-user process count cannot be isolated without a privileged PID namespace".into(),
         ],
@@ -288,16 +283,6 @@ fn apply_resource_limits(limits: &ResourceLimits) -> std::io::Result<()> {
     };
     if unsafe { libc::setrlimit(libc::RLIMIT_CPU, &cpu) } != 0 {
         return Err(std::io::Error::last_os_error());
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let memory = libc::rlimit {
-            rlim_cur: limits.memory_bytes as libc::rlim_t,
-            rlim_max: limits.memory_bytes as libc::rlim_t,
-        };
-        if unsafe { libc::setrlimit(libc::RLIMIT_AS, &memory) } != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
     }
     Ok(())
 }
