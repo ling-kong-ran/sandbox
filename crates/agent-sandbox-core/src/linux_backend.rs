@@ -227,12 +227,29 @@ pub(crate) async fn spawn(
         }
     };
     close_fd(sync_read);
-    if let Err(error) = std::fs::write(cgroup.path.join("cgroup.procs"), child.id().to_string()) {
+    let child_pid = child.id().to_string();
+    if let Err(error) = std::fs::write(cgroup.path.join("cgroup.procs"), &child_pid) {
         let _ = child.kill();
         close_fd(sync_write);
         return Err(SandboxError::Process(format!(
             "cannot attach bubblewrap to cgroup: {error}"
         )));
+    }
+    let attached = std::fs::read_to_string(cgroup.path.join("cgroup.procs"))
+        .map(|value| value.lines().any(|line| line == child_pid))
+        .unwrap_or(false);
+    if !attached {
+        let _ = child.kill();
+        close_fd(sync_write);
+        return Err(SandboxError::Process(
+            "bubblewrap cgroup attachment could not be verified".into(),
+        ));
+    }
+    if std::env::var_os("AGENT_SANDBOX_DEBUG").is_some() {
+        eprintln!(
+            "agent-sandboxd: attached pid={child_pid} cgroup={}",
+            cgroup.path.display()
+        );
     }
     close_fd(sync_write);
     start_cpu_watchdog(Arc::clone(&cgroup), execution.limits.cpu_time_ms);
@@ -409,9 +426,27 @@ fn create_cgroup(root: &Path, limits: &ResourceLimits) -> Result<Arc<Cgroup>, Sa
         ("pids.max", limits.processes.to_string()),
         ("cpu.max", format!("{period} {period}")),
     ] {
-        std::fs::write(cgroup.path.join(name), value).map_err(|error| {
+        let setting = cgroup.path.join(name);
+        std::fs::write(&setting, &value).map_err(|error| {
             SandboxError::Process(format!("cannot configure cgroup {name}: {error}"))
         })?;
+        let actual = std::fs::read_to_string(&setting).map_err(|error| {
+            SandboxError::Process(format!("cannot verify cgroup {name}: {error}"))
+        })?;
+        if actual.trim() != value {
+            return Err(SandboxError::Process(format!(
+                "cgroup {name} verification failed: expected {value}, got {}",
+                actual.trim()
+            )));
+        }
+    }
+    if std::env::var_os("AGENT_SANDBOX_DEBUG").is_some() {
+        eprintln!(
+            "agent-sandboxd: cgroup={} memory.max={} pids.max={} cpu.max={period} {period}",
+            cgroup.path.display(),
+            limits.memory_bytes,
+            limits.processes,
+        );
     }
     Ok(cgroup)
 }

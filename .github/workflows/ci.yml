@@ -65,5 +65,6 @@ jobs:
         run: |
           if [ "${{ runner.os }}" = Linux ]; then
             echo "$$" | sudo tee "$AGENT_SANDBOX_CGROUP_ROOT/driver/cgroup.procs" >/dev/null
+            export AGENT_SANDBOX_DEBUG=1
           fi
           npm test
