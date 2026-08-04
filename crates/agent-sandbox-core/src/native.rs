@@ -1241,10 +1241,7 @@ mod windows_backend {
                 "TMP",
                 parent_value("TMP").unwrap_or_else(|| workdir.as_os_str().to_os_string()),
             ),
-            (
-                "PATH",
-                parent_value("PATH").unwrap_or_else(|| system_path.into_os_string()),
-            ),
+            ("PATH", system_path.into_os_string()),
         ] {
             insert(name, fallback);
         }
