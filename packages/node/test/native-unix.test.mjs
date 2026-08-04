@@ -33,6 +33,10 @@ test('Unix native backend confines arbitrary executables and denies network acce
     executable: daemon,
     env: { ...process.env, AGENT_SANDBOX_STATE_DIR: state },
     client: { name: 'native-unix-conformance', version: '0.1.0' },
+    onDiagnostic:
+      process.env.AGENT_SANDBOX_DEBUG === '1'
+        ? (message) => process.stderr.write(message)
+        : undefined,
   })
 
   try {
