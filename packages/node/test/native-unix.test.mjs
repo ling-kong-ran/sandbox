@@ -174,7 +174,7 @@ test('Unix native backend confines arbitrary executables and denies network acce
         program: 'node',
         args: [
           '-e',
-          "const {spawn}=require('node:child_process'); let failed=false; for(let i=0;i<12;i++){const child=spawn(process.execPath,['-e','setTimeout(()=>{},10000)']); child.on('error',()=>{failed=true}); child.on('exit',code=>{if(code!==0)failed=true})} setTimeout(()=>process.exit(failed?42:0),2000)",
+          "const {spawn}=require('node:child_process'); const children=[]; for(let i=0;i<12;i++){const child=spawn(process.execPath,['-e','setTimeout(()=>{},10000)']); child.on('error',()=>{}); children.push(child)} setTimeout(()=>process.exit(children.filter(child=>child.pid&&child.exitCode===null).length<4?42:0),2000)",
         ],
       },
       cwd: { mount: 'workspace', path: '.' },
