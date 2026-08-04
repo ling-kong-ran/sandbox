@@ -469,66 +469,68 @@ fn cpu_usage_usec(path: &Path) -> Option<u64> {
 
 fn attach_process_tree(cgroup: &Path, root_pid: u32) -> Result<(), SandboxError> {
     let mut pids = BTreeSet::from([root_pid]);
-    for _ in 0..20 {
-        let previous = pids.len();
-        let parents: Vec<u32> = pids.iter().copied().collect();
-        for parent in parents {
-            let task_root = PathBuf::from(format!("/proc/{parent}/task"));
-            let Ok(tasks) = std::fs::read_dir(task_root) else {
-                continue;
-            };
-            for task in tasks.flatten() {
-                let Ok(children) = std::fs::read_to_string(task.path().join("children")) else {
+    let mut previous = BTreeSet::new();
+    for _ in 0..200 {
+        loop {
+            let count = pids.len();
+            let parents: Vec<u32> = pids.iter().copied().collect();
+            for parent in parents {
+                let task_root = PathBuf::from(format!("/proc/{parent}/task"));
+                let Ok(tasks) = std::fs::read_dir(task_root) else {
                     continue;
                 };
-                pids.extend(
-                    children
-                        .split_whitespace()
-                        .filter_map(|pid| pid.parse::<u32>().ok()),
+                for task in tasks.flatten() {
+                    let Ok(children) = std::fs::read_to_string(task.path().join("children")) else {
+                        continue;
+                    };
+                    pids.extend(
+                        children
+                            .split_whitespace()
+                            .filter_map(|pid| pid.parse::<u32>().ok()),
+                    );
+                }
+            }
+            if pids.len() == count {
+                break;
+            }
+        }
+
+        for pid in &pids {
+            if let Err(error) = std::fs::write(cgroup.join("cgroup.procs"), pid.to_string()) {
+                if Path::new(&format!("/proc/{pid}")).exists() {
+                    return Err(SandboxError::Process(format!(
+                        "cannot attach bubblewrap process {pid} to cgroup: {error}"
+                    )));
+                }
+            }
+        }
+        let attached: BTreeSet<u32> = std::fs::read_to_string(cgroup.join("cgroup.procs"))
+            .map_err(|error| SandboxError::Process(format!("cannot verify cgroup tree: {error}")))?
+            .lines()
+            .filter_map(|pid| pid.parse().ok())
+            .collect();
+        let all_attached = pids
+            .iter()
+            .all(|pid| !Path::new(&format!("/proc/{pid}")).exists() || attached.contains(pid));
+        if all_attached && pids == previous {
+            if std::env::var_os("AGENT_SANDBOX_DEBUG").is_some() {
+                eprintln!(
+                    "agent-sandboxd: attached pids={} cgroup={}",
+                    pids.iter()
+                        .map(u32::to_string)
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    cgroup.display()
                 );
             }
+            return Ok(());
         }
-        if pids.len() > 1 && pids.len() == previous {
-            break;
-        }
+        previous = pids.clone();
         std::thread::sleep(Duration::from_millis(5));
     }
-
-    for pid in &pids {
-        if let Err(error) = std::fs::write(cgroup.join("cgroup.procs"), pid.to_string()) {
-            if Path::new(&format!("/proc/{pid}")).exists() {
-                return Err(SandboxError::Process(format!(
-                    "cannot attach bubblewrap process {pid} to cgroup: {error}"
-                )));
-            }
-        }
-    }
-    let attached: BTreeSet<u32> = std::fs::read_to_string(cgroup.join("cgroup.procs"))
-        .map_err(|error| SandboxError::Process(format!("cannot verify cgroup tree: {error}")))?
-        .lines()
-        .filter_map(|pid| pid.parse().ok())
-        .collect();
-    for pid in pids
-        .iter()
-        .filter(|pid| Path::new(&format!("/proc/{pid}")).exists())
-    {
-        if !attached.contains(pid) {
-            return Err(SandboxError::Process(format!(
-                "bubblewrap process {pid} escaped cgroup attachment"
-            )));
-        }
-    }
-    if std::env::var_os("AGENT_SANDBOX_DEBUG").is_some() {
-        eprintln!(
-            "agent-sandboxd: attached pids={} cgroup={}",
-            pids.iter()
-                .map(u32::to_string)
-                .collect::<Vec<_>>()
-                .join(","),
-            cgroup.display()
-        );
-    }
-    Ok(())
+    Err(SandboxError::Process(
+        "bubblewrap process tree did not stabilize inside its cgroup".into(),
+    ))
 }
 
 fn sync_pipe() -> Result<(RawFd, RawFd), SandboxError> {
