@@ -46,7 +46,14 @@ pub(crate) fn report() -> CapabilityReport {
     features.insert("filesystemWriteBoundary".into(), FeatureState::Enforced);
     features.insert("networkDeny".into(), FeatureState::Enforced);
     features.insert("processTree".into(), FeatureState::Enforced);
-    features.insert("memoryLimit".into(), FeatureState::Enforced);
+    features.insert(
+        "memoryLimit".into(),
+        if cfg!(target_os = "linux") {
+            FeatureState::Enforced
+        } else {
+            FeatureState::Limited
+        },
+    );
     features.insert("cpuLimit".into(), FeatureState::Enforced);
     features.insert("processLimit".into(), FeatureState::Limited);
     features.insert("filesystemRpc".into(), FeatureState::Unavailable);
@@ -152,11 +159,14 @@ pub(crate) async fn spawn(
             if libc::setpgid(0, 0) != 0 {
                 return Err(std::io::Error::last_os_error());
             }
-            apply_resource_limits(&limits)?;
+            apply_resource_limits(&limits)
+                .map_err(|error| std::io::Error::other(format!("resource limits: {error}")))?;
             #[cfg(target_os = "linux")]
-            apply_linux_sandbox(&read_paths, &write_paths, deny_network)?;
+            apply_linux_sandbox(&read_paths, &write_paths, deny_network)
+                .map_err(|error| std::io::Error::other(format!("Landlock/seccomp: {error}")))?;
             #[cfg(target_os = "macos")]
-            apply_macos_sandbox(&read_paths, &write_paths, deny_network)?;
+            apply_macos_sandbox(&read_paths, &write_paths, deny_network)
+                .map_err(|error| std::io::Error::other(format!("Seatbelt: {error}")))?;
             Ok(())
         });
     }
@@ -273,12 +283,15 @@ fn apply_resource_limits(limits: &ResourceLimits) -> std::io::Result<()> {
     if unsafe { libc::setrlimit(libc::RLIMIT_CPU, &cpu) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
-    let memory = libc::rlimit {
-        rlim_cur: limits.memory_bytes as libc::rlim_t,
-        rlim_max: limits.memory_bytes as libc::rlim_t,
-    };
-    if unsafe { libc::setrlimit(libc::RLIMIT_AS, &memory) } != 0 {
-        return Err(std::io::Error::last_os_error());
+    #[cfg(target_os = "linux")]
+    {
+        let memory = libc::rlimit {
+            rlim_cur: limits.memory_bytes as libc::rlim_t,
+            rlim_max: limits.memory_bytes as libc::rlim_t,
+        };
+        if unsafe { libc::setrlimit(libc::RLIMIT_AS, &memory) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
     }
     Ok(())
 }
@@ -321,8 +334,10 @@ fn apply_linux_sandbox(
             .map_err(std::io::Error::other)?;
     }
     let mut ruleset = builder.create().map_err(std::io::Error::other)?;
-    let read_access = (AccessFs::ReadFile | AccessFs::ReadDir | AccessFs::Execute) & handled_fs;
-    let write_access = (read_access
+    let read_directory_access =
+        (AccessFs::ReadFile | AccessFs::ReadDir | AccessFs::Execute) & handled_fs;
+    let read_file_access = (AccessFs::ReadFile | AccessFs::Execute) & handled_fs;
+    let write_access = (read_directory_access
         | AccessFs::WriteFile
         | AccessFs::MakeChar
         | AccessFs::MakeDir
@@ -337,10 +352,15 @@ fn apply_linux_sandbox(
         | AccessFs::Truncate)
         & handled_fs;
     for path in read_paths {
+        let access = if path.is_dir() {
+            read_directory_access
+        } else {
+            read_file_access
+        };
         ruleset = ruleset
             .add_rule(PathBeneath::new(
                 PathFd::new(path).map_err(std::io::Error::other)?,
-                read_access,
+                access,
             ))
             .map_err(std::io::Error::other)?;
     }
@@ -400,9 +420,8 @@ fn apply_macos_sandbox(
     write_paths: &[PathBuf],
     deny_network: bool,
 ) -> std::io::Result<()> {
-    let mut profile = String::from(
-        "(version 1)\n(deny default)\n(allow process*)\n(allow signal (target self))\n(allow file-read-metadata)\n",
-    );
+    let mut profile =
+        String::from("(version 1)\n(deny default)\n(allow process*)\n(allow file-read-metadata)\n");
     for path in read_paths {
         profile.push_str(&format!(
             "(allow file-read* (subpath \"{}\"))\n",
