@@ -1066,6 +1066,7 @@ mod windows_backend {
         workdir: &Path,
         parent: impl Fn(&str) -> Option<OsString>,
     ) -> Vec<(OsString, OsString)> {
+        let parent_value = |name: &str| parent(name).filter(|value| !value.is_empty());
         let mut environment = BTreeMap::new();
         let mut insert = |name: &str, value: OsString| {
             environment
@@ -1076,7 +1077,8 @@ mod windows_backend {
             insert(name, OsString::from(value));
         }
 
-        let windows_root = parent("SystemRoot").unwrap_or_else(|| OsString::from(r"C:\Windows"));
+        let windows_root =
+            parent_value("SystemRoot").unwrap_or_else(|| OsString::from(r"C:\Windows"));
         let system_cmd = PathBuf::from(&windows_root)
             .join("System32")
             .join("cmd.exe");
@@ -1085,31 +1087,31 @@ mod windows_backend {
             ("SystemRoot", windows_root.clone()),
             (
                 "windir",
-                parent("windir").unwrap_or_else(|| windows_root.clone()),
+                parent_value("windir").unwrap_or_else(|| windows_root.clone()),
             ),
             (
                 "ComSpec",
-                parent("ComSpec").unwrap_or_else(|| system_cmd.into_os_string()),
+                parent_value("ComSpec").unwrap_or_else(|| system_cmd.into_os_string()),
             ),
             (
                 "PATHEXT",
-                parent("PATHEXT").unwrap_or_else(|| OsString::from(".COM;.EXE;.BAT;.CMD")),
+                parent_value("PATHEXT").unwrap_or_else(|| OsString::from(".COM;.EXE;.BAT;.CMD")),
             ),
             (
                 "LOCALAPPDATA",
-                parent("LOCALAPPDATA").unwrap_or_else(|| workdir.as_os_str().to_os_string()),
+                parent_value("LOCALAPPDATA").unwrap_or_else(|| workdir.as_os_str().to_os_string()),
             ),
             (
                 "TEMP",
-                parent("TEMP").unwrap_or_else(|| workdir.as_os_str().to_os_string()),
+                parent_value("TEMP").unwrap_or_else(|| workdir.as_os_str().to_os_string()),
             ),
             (
                 "TMP",
-                parent("TMP").unwrap_or_else(|| workdir.as_os_str().to_os_string()),
+                parent_value("TMP").unwrap_or_else(|| workdir.as_os_str().to_os_string()),
             ),
             (
                 "PATH",
-                parent("PATH").unwrap_or_else(|| system_path.into_os_string()),
+                parent_value("PATH").unwrap_or_else(|| system_path.into_os_string()),
             ),
         ] {
             insert(name, fallback);
@@ -1131,7 +1133,7 @@ mod windows_backend {
             "SYSTEMDRIVE",
             "USERPROFILE",
         ] {
-            if let Some(value) = parent(name) {
+            if let Some(value) = parent_value(name) {
                 insert(name, value);
             }
         }
@@ -1233,7 +1235,9 @@ mod windows_backend {
                 ("CI".to_string(), "1".to_string()),
             ]);
             let environment =
-                process_environment_with(&requested, Path::new(r"D:\workspace"), |_| None);
+                process_environment_with(&requested, Path::new(r"D:\workspace"), |name| {
+                    (name == "LOCALAPPDATA").then(OsString::new)
+                });
             let find = |name: &str| {
                 environment
                     .iter()
