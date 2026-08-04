@@ -1,0 +1,27 @@
+{
+  "name": "@agent-sandbox/client",
+  "version": "0.1.0",
+  "description": "Framework-neutral Node.js client for agent-sandboxd",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./packages/node/src/index.d.ts",
+      "import": "./packages/node/src/index.mjs"
+    }
+  },
+  "files": [
+    "packages/node/src",
+    "schema",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "cargo build --workspace",
+    "test": "node --test packages/node/test/*.test.mjs",
+    "check": "cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace && cargo build --workspace && npm test"
+  }
+}
