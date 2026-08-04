@@ -1056,11 +1056,64 @@ mod windows_backend {
         requested: &BTreeMap<String, String>,
         workdir: &Path,
     ) -> Result<Vec<(OsString, OsString)>, SandboxError> {
-        let requested: Vec<_> = requested
-            .iter()
-            .map(|(name, value)| (OsString::from(name), OsString::from(value)))
-            .collect();
-        let mut environment = rappct::launch::merge_parent_env(requested);
+        Ok(process_environment_with(requested, workdir, |name| {
+            std::env::var_os(name)
+        }))
+    }
+
+    fn process_environment_with(
+        requested: &BTreeMap<String, String>,
+        workdir: &Path,
+        parent: impl Fn(&str) -> Option<OsString>,
+    ) -> Vec<(OsString, OsString)> {
+        let mut environment = BTreeMap::new();
+        let mut insert = |name: &str, value: OsString| {
+            environment
+                .entry(name.to_ascii_lowercase())
+                .or_insert_with(|| (OsString::from(name), value));
+        };
+        for (name, value) in requested {
+            insert(name, OsString::from(value));
+        }
+
+        let windows_root = parent("SystemRoot").unwrap_or_else(|| OsString::from(r"C:\Windows"));
+        let system_cmd = PathBuf::from(&windows_root)
+            .join("System32")
+            .join("cmd.exe");
+        let system_path = PathBuf::from(&windows_root).join("System32");
+        for (name, fallback) in [
+            ("SystemRoot", windows_root.clone()),
+            (
+                "windir",
+                parent("windir").unwrap_or_else(|| windows_root.clone()),
+            ),
+            (
+                "ComSpec",
+                parent("ComSpec").unwrap_or_else(|| system_cmd.into_os_string()),
+            ),
+            (
+                "PATHEXT",
+                parent("PATHEXT").unwrap_or_else(|| OsString::from(".COM;.EXE;.BAT;.CMD")),
+            ),
+            (
+                "LOCALAPPDATA",
+                parent("LOCALAPPDATA").unwrap_or_else(|| workdir.as_os_str().to_os_string()),
+            ),
+            (
+                "TEMP",
+                parent("TEMP").unwrap_or_else(|| workdir.as_os_str().to_os_string()),
+            ),
+            (
+                "TMP",
+                parent("TMP").unwrap_or_else(|| workdir.as_os_str().to_os_string()),
+            ),
+            (
+                "PATH",
+                parent("PATH").unwrap_or_else(|| system_path.into_os_string()),
+            ),
+        ] {
+            insert(name, fallback);
+        }
         for name in [
             "ALLUSERSPROFILE",
             "APPDATA",
@@ -1069,7 +1122,6 @@ mod windows_backend {
             "CommonProgramW6432",
             "HOMEDRIVE",
             "HOMEPATH",
-            "LOCALAPPDATA",
             "OS",
             "ProgramData",
             "ProgramFiles",
@@ -1079,25 +1131,19 @@ mod windows_backend {
             "SYSTEMDRIVE",
             "USERPROFILE",
         ] {
-            if let Some(value) = std::env::var_os(name) {
-                environment.push((OsString::from(name), value));
+            if let Some(value) = parent(name) {
+                insert(name, value);
             }
         }
         if let Some(prefix) = workdir.to_string_lossy().get(..2)
             && prefix.ends_with(':')
         {
-            environment.push((
-                OsString::from(format!("={}", prefix.to_ascii_uppercase())),
+            insert(
+                &format!("={}", prefix.to_ascii_uppercase()),
                 workdir.as_os_str().to_os_string(),
-            ));
+            );
         }
-        environment.sort_by(|left, right| {
-            left.0
-                .to_string_lossy()
-                .to_ascii_lowercase()
-                .cmp(&right.0.to_string_lossy().to_ascii_lowercase())
-        });
-        Ok(environment)
+        environment.into_values().collect()
     }
 
     fn job_limits(limits: &ResourceLimits) -> JobLimits {
@@ -1149,10 +1195,13 @@ mod windows_backend {
 
     #[cfg(test)]
     mod tests {
+        use std::collections::BTreeMap;
         use std::error::Error;
+        use std::ffi::OsString;
         use std::fmt::{Display, Formatter};
+        use std::path::Path;
 
-        use super::{error_chain, quote_windows_argument};
+        use super::{error_chain, process_environment_with, quote_windows_argument};
 
         #[derive(Debug)]
         struct LaunchStageError(std::io::Error);
@@ -1175,6 +1224,39 @@ mod windows_backend {
             let message = error_chain(&error);
             assert!(message.starts_with("CreateProcessW failed: "));
             assert!(message.contains("os error 5"));
+        }
+
+        #[test]
+        fn builds_required_environment_without_parent_variables() {
+            let requested = BTreeMap::from([
+                ("Path".to_string(), r"D:\tools".to_string()),
+                ("CI".to_string(), "1".to_string()),
+            ]);
+            let environment =
+                process_environment_with(&requested, Path::new(r"D:\workspace"), |_| None);
+            let find = |name: &str| {
+                environment
+                    .iter()
+                    .find(|(key, _)| key.to_string_lossy().eq_ignore_ascii_case(name))
+                    .map(|(_, value)| value.clone())
+            };
+
+            assert_eq!(find("PATH"), Some(OsString::from(r"D:\tools")));
+            assert_eq!(find("SystemRoot"), Some(OsString::from(r"C:\Windows")));
+            assert_eq!(
+                find("ComSpec"),
+                Some(OsString::from(r"C:\Windows\System32\cmd.exe"))
+            );
+            assert_eq!(find("LOCALAPPDATA"), Some(OsString::from(r"D:\workspace")));
+            assert_eq!(find("TEMP"), Some(OsString::from(r"D:\workspace")));
+            assert_eq!(find("=D:"), Some(OsString::from(r"D:\workspace")));
+            assert_eq!(
+                environment
+                    .iter()
+                    .filter(|(key, _)| key.to_string_lossy().eq_ignore_ascii_case("PATH"))
+                    .count(),
+                1
+            );
         }
 
         #[test]
