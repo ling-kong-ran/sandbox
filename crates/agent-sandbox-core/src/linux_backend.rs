@@ -148,6 +148,15 @@ pub(crate) async fn spawn(
         .map(|mount| mount.source.clone())
         .chain(std::iter::once(platform.temp_dir.clone()))
         .collect();
+    let landlock_write_paths: Vec<PathBuf> = write_paths
+        .iter()
+        .cloned()
+        .chain([
+            PathBuf::from("/proc/self/uid_map"),
+            PathBuf::from("/proc/self/gid_map"),
+            PathBuf::from("/proc/self/setgroups"),
+        ])
+        .collect();
     let deny_network = policy.original.network.mode == NetworkMode::Deny;
     let cgroup = create_cgroup(&platform.cgroup_root, &execution.limits)?;
     let (sync_read, sync_write) = sync_pipe()?;
@@ -196,7 +205,7 @@ pub(crate) async fn spawn(
         command.pre_exec(move || {
             apply_resource_limits(&limits)
                 .map_err(|error| std::io::Error::other(format!("resource limits: {error}")))?;
-            apply_landlock(&read_paths, &write_paths)
+            apply_landlock(&read_paths, &landlock_write_paths)
                 .map_err(|error| std::io::Error::other(format!("Landlock: {error}")))?;
             if deny_network {
                 install_network_seccomp()
