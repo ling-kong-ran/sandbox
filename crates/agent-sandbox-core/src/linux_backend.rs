@@ -148,15 +148,6 @@ pub(crate) async fn spawn(
         .map(|mount| mount.source.clone())
         .chain(std::iter::once(platform.temp_dir.clone()))
         .collect();
-    let landlock_write_paths: Vec<PathBuf> = write_paths
-        .iter()
-        .cloned()
-        .chain([
-            PathBuf::from("/proc/self/uid_map"),
-            PathBuf::from("/proc/self/gid_map"),
-            PathBuf::from("/proc/self/setgroups"),
-        ])
-        .collect();
     let deny_network = policy.original.network.mode == NetworkMode::Deny;
     let cgroup = create_cgroup(&platform.cgroup_root, &execution.limits)?;
     let (sync_read, sync_write) = sync_pipe()?;
@@ -183,9 +174,25 @@ pub(crate) async fn spawn(
             command.arg("--bind").arg(path).arg(path);
         }
     }
+    let sandbox_init = std::env::current_exe().map_err(|error| {
+        SandboxError::Process(format!("cannot resolve sandbox init executable: {error}"))
+    })?;
     command
         .arg("--chdir")
         .arg(&workdir)
+        .arg("--")
+        .arg(sandbox_init)
+        .arg("linux-init");
+    for path in &read_paths {
+        command.arg("--read").arg(path);
+    }
+    for path in &write_paths {
+        command.arg("--write").arg(path);
+    }
+    if deny_network {
+        command.arg("--deny-network");
+    }
+    command
         .arg("--")
         .arg(&program)
         .args(args)
@@ -205,12 +212,6 @@ pub(crate) async fn spawn(
         command.pre_exec(move || {
             apply_resource_limits(&limits)
                 .map_err(|error| std::io::Error::other(format!("resource limits: {error}")))?;
-            apply_landlock(&read_paths, &landlock_write_paths)
-                .map_err(|error| std::io::Error::other(format!("Landlock: {error}")))?;
-            if deny_network {
-                install_network_seccomp()
-                    .map_err(|error| std::io::Error::other(format!("seccomp: {error}")))?;
-            }
             Ok(())
         });
     }
@@ -508,13 +509,7 @@ fn runtime_read_paths(
             paths.insert(path.canonicalize().unwrap_or(path));
         }
     }
-    for path in [
-        "/etc/ld.so.cache",
-        "/dev/null",
-        "/dev/urandom",
-        "/proc/sys/kernel/overflowuid",
-        "/proc/sys/kernel/overflowgid",
-    ] {
+    for path in ["/etc/ld.so.cache", "/dev/null", "/dev/urandom"] {
         let path = PathBuf::from(path);
         if path.exists() {
             paths.insert(path.canonicalize().unwrap_or(path));
@@ -527,6 +522,25 @@ fn runtime_read_paths(
         paths.extend(std::env::split_paths(path).filter_map(|entry| entry.canonicalize().ok()));
     }
     paths.into_iter().collect()
+}
+
+pub(crate) fn run_init(
+    read_paths: &[PathBuf],
+    write_paths: &[PathBuf],
+    deny_network: bool,
+    program: &std::ffi::OsStr,
+    args: &[std::ffi::OsString],
+) -> Result<(), SandboxError> {
+    apply_landlock(read_paths, write_paths)
+        .map_err(|error| SandboxError::Process(format!("Landlock: {error}")))?;
+    if deny_network {
+        install_network_seccomp()
+            .map_err(|error| SandboxError::Process(format!("seccomp: {error}")))?;
+    }
+    let error = Command::new(program).args(args).exec();
+    Err(SandboxError::Process(format!(
+        "cannot execute sandbox target: {error}"
+    )))
 }
 
 fn apply_resource_limits(limits: &ResourceLimits) -> std::io::Result<()> {

@@ -44,6 +44,18 @@ enum CommandLine {
         #[arg(long)]
         json: bool,
     },
+    #[cfg(target_os = "linux")]
+    #[command(hide = true)]
+    LinuxInit {
+        #[arg(long)]
+        read: Vec<std::path::PathBuf>,
+        #[arg(long)]
+        write: Vec<std::path::PathBuf>,
+        #[arg(long)]
+        deny_network: bool,
+        #[arg(required = true, trailing_var_arg = true)]
+        command: Vec<std::ffi::OsString>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -703,11 +715,32 @@ async fn main() {
     let result = match cli.command {
         CommandLine::Probe { json } => run_probe(json).await,
         CommandLine::Child { parent_pid } => run_child(parent_pid).await,
+        #[cfg(target_os = "linux")]
+        CommandLine::LinuxInit {
+            read,
+            write,
+            deny_network,
+            command,
+        } => run_linux_init(read, write, deny_network, command),
     };
     if let Err(error) = result {
         eprintln!("agent-sandboxd: {error}");
         std::process::exit(1);
     }
+}
+
+#[cfg(target_os = "linux")]
+fn run_linux_init(
+    read: Vec<std::path::PathBuf>,
+    write: Vec<std::path::PathBuf>,
+    deny_network: bool,
+    command: Vec<std::ffi::OsString>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let (program, args) = command
+        .split_first()
+        .ok_or("sandbox init target executable is required")?;
+    agent_sandbox_core::run_linux_init(&read, &write, deny_network, program, args)?;
+    Ok(())
 }
 
 async fn run_probe(json: bool) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
