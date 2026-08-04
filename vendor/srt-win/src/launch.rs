@@ -15,7 +15,7 @@ use std::ffi::c_void;
 use std::mem::{size_of, zeroed};
 use std::path::Path;
 use windows::Win32::Foundation::{
-    CloseHandle, HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation, WAIT_OBJECT_0,
+    CloseHandle, HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::System::Console::{
     GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
@@ -23,7 +23,7 @@ use windows::Win32::System::Console::{
 use windows::Win32::System::Threading::{
     CREATE_BREAKAWAY_FROM_JOB, CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
     CreateProcessAsUserW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
-    GetCurrentProcess, GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList,
+    GetCurrentProcess, GetExitCodeProcess, InitializeProcThreadAttributeList,
     LPPROC_THREAD_ATTRIBUTE_LIST, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
     PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION,
     ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW, TerminateProcess,
@@ -325,10 +325,21 @@ pub fn run_lockdown(
         );
     }
 
-    // 11) Wait + collect exit code.
-    let rc = unsafe { WaitForSingleObject(child.process(), INFINITE) };
-    if rc != WAIT_OBJECT_0 {
-        eprintln!("srt-win: WaitForSingleObject returned 0x{:x}", rc.0);
+    // 11) Wait + enforce aggregate user+kernel CPU accounting for the entire Job.
+    // The kernel's JOB_TIME flag is retained as a backstop; explicit accounting
+    // also gives cpu_time_ms consistent semantics across Windows versions.
+    let cpu_limit_100ns = limits.cpu_time_ms.saturating_mul(10_000);
+    loop {
+        let rc = unsafe { WaitForSingleObject(child.process(), 10) };
+        if rc == WAIT_OBJECT_0 {
+            break;
+        }
+        if rc != WAIT_TIMEOUT {
+            return Err(anyhow!("WaitForSingleObject returned 0x{:x}", rc.0));
+        }
+        if job.total_cpu_100ns()? >= cpu_limit_100ns {
+            job.terminate(0xC000_0044)?;
+        }
     }
     let mut code: u32 = 0;
     unsafe {

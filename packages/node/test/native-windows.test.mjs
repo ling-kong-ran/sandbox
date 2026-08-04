@@ -151,6 +151,15 @@ test('Windows native backend confines an arbitrary host executable', async (t) =
     })
     assert.notEqual(memoryResult.exitCode, 0)
 
+    const cpuStartedAt = Date.now()
+    const cpuResult = await sandbox.exec({
+      command: { kind: 'exec', program: 'node', args: ['-e', 'for (;;) {}'] },
+      cwd: { mount: 'workspace', path: '.' },
+      limits: { cpuTimeMs: 100 },
+    })
+    assert.notEqual(cpuResult.exitCode, 0)
+    assert.ok(Date.now() - cpuStartedAt < 10_000)
+
     const processResult = await sandbox.exec({
       command: {
         kind: 'exec',

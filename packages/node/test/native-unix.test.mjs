@@ -138,6 +138,24 @@ test('Unix native backend confines arbitrary executables and denies network acce
     assert.notEqual(memoryResult.exitCode, 0)
     await memorySandbox.close()
 
+    const cpuSandbox = await client.createSandbox({
+      tenantId: 'unix-conformance',
+      profile: 'system-minimal',
+      authorizationId: 'cpu-limit',
+      policy: {
+        ...sandboxPolicy,
+        limits: { ...sandboxPolicy.limits, cpuTimeMs: 100 },
+      },
+    })
+    const cpuStartedAt = Date.now()
+    const cpuResult = await cpuSandbox.exec({
+      command: { kind: 'exec', program: 'node', args: ['-e', 'for (;;) {}'] },
+      cwd: { mount: 'workspace', path: '.' },
+    })
+    assert.notEqual(cpuResult.exitCode, 0)
+    assert.ok(Date.now() - cpuStartedAt < 5_000)
+    await cpuSandbox.close()
+
     const processSandbox = await client.createSandbox({
       tenantId: 'unix-conformance',
       profile: 'system-minimal',

@@ -21,12 +21,15 @@ use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
     JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_JOB_TIME,
-    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_UILIMIT_DESKTOP,
-    JOB_OBJECT_UILIMIT_DISPLAYSETTINGS, JOB_OBJECT_UILIMIT_EXITWINDOWS,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_TERMINATE_AT_END_OF_JOB,
+    JOB_OBJECT_UILIMIT_DESKTOP, JOB_OBJECT_UILIMIT_DISPLAYSETTINGS, JOB_OBJECT_UILIMIT_EXITWINDOWS,
     JOB_OBJECT_UILIMIT_GLOBALATOMS, JOB_OBJECT_UILIMIT_HANDLES, JOB_OBJECT_UILIMIT_READCLIPBOARD,
     JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS, JOB_OBJECT_UILIMIT_WRITECLIPBOARD,
-    JOBOBJECT_BASIC_UI_RESTRICTIONS, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-    JobObjectBasicUIRestrictions, JobObjectExtendedLimitInformation, SetInformationJobObject,
+    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_BASIC_UI_RESTRICTIONS,
+    JOBOBJECT_END_OF_JOB_TIME_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JobObjectBasicAccountingInformation, JobObjectBasicUIRestrictions,
+    JobObjectEndOfJobTimeInformation, JobObjectExtendedLimitInformation, QueryInformationJobObject,
+    SetInformationJobObject, TerminateJobObject,
 };
 
 /// RAII job object. `Drop` closes the handle; with
@@ -75,6 +78,18 @@ impl Job {
                 size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
             )
             .context("SetInformationJobObject(KILL_ON_JOB_CLOSE)")?;
+            if limits.is_some() {
+                let end_of_job = JOBOBJECT_END_OF_JOB_TIME_INFORMATION {
+                    EndOfJobTimeAction: JOB_OBJECT_TERMINATE_AT_END_OF_JOB,
+                };
+                SetInformationJobObject(
+                    job.0,
+                    JobObjectEndOfJobTimeInformation,
+                    &end_of_job as *const _ as *const c_void,
+                    size_of::<JOBOBJECT_END_OF_JOB_TIME_INFORMATION>() as u32,
+                )
+                .context("SetInformationJobObject(EndOfJobTimeInformation)")?;
+            }
 
             //   READCLIPBOARD     — block OpenClipboard for read
             //   WRITECLIPBOARD    — block SetClipboardData
@@ -109,6 +124,28 @@ impl Job {
     /// Raw job handle (for `IsProcessInJob` diagnostics).
     pub fn raw(&self) -> HANDLE {
         self.0
+    }
+
+    pub fn total_cpu_100ns(&self) -> Result<u64> {
+        let mut accounting: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { zeroed() };
+        unsafe {
+            QueryInformationJobObject(
+                Some(self.0),
+                JobObjectBasicAccountingInformation,
+                &mut accounting as *mut _ as *mut c_void,
+                size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                None,
+            )
+            .context("QueryInformationJobObject(BasicAccountingInformation)")?;
+        }
+        Ok(accounting
+            .TotalUserTime
+            .saturating_add(accounting.TotalKernelTime)
+            .max(0) as u64)
+    }
+
+    pub fn terminate(&self, exit_code: u32) -> Result<()> {
+        unsafe { TerminateJobObject(self.0, exit_code).context("TerminateJobObject") }
     }
 
     /// Assign a (suspended) process to the job.
