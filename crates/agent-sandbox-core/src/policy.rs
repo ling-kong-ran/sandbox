@@ -507,7 +507,7 @@ mod tests {
 
     #[test]
     fn execution_cannot_expand_limits_or_escape_cwd() {
-        let root = std::env::temp_dir();
+        let root = std::env::current_dir().expect("current directory");
         let policy = ValidatedPolicy::new(policy_for(&root)).expect("valid policy");
         let expanded = policy.validate_execution(
             CommandSpec::Exec {
@@ -543,7 +543,7 @@ mod tests {
 
     #[test]
     fn sensitive_environment_is_rejected() {
-        let root = std::env::temp_dir();
+        let root = std::env::current_dir().expect("current directory");
         let mut input = policy_for(&root);
         input.environment.allow_set.push("OPENAI_API_KEY".into());
         assert!(ValidatedPolicy::new(input).is_err());
@@ -551,7 +551,7 @@ mod tests {
 
     #[test]
     fn protected_root_cannot_be_mounted() {
-        let root = std::env::temp_dir();
+        let root = std::env::current_dir().expect("current directory");
         let mut input = policy_for(&root);
         input.filesystem.protected_roots = vec![root.to_string_lossy().into_owned()];
         assert!(ValidatedPolicy::new(input).is_err());

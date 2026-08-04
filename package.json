@@ -21,7 +21,7 @@
   },
   "scripts": {
     "build": "cargo build --workspace",
-    "test": "node --test packages/node/test/*.test.mjs",
+    "test": "node scripts/run-node-tests.mjs",
     "check": "cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace && cargo build --workspace && npm test"
   }
 }
