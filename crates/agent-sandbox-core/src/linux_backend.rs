@@ -484,7 +484,7 @@ fn attach_process_tree(cgroup: &Path, root_pid: u32) -> Result<(), SandboxError>
                 pids.extend(
                     children
                         .split_whitespace()
-                        .filter_map(|pid| pid.parse().ok()),
+                        .filter_map(|pid| pid.parse::<u32>().ok()),
                 );
             }
         }
