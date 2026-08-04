@@ -140,6 +140,56 @@ test('Windows native backend confines an arbitrary host executable', async (t) =
       /sandbox-test-secret/,
     )
 
+    const memoryResult = await sandbox.exec({
+      command: {
+        kind: 'exec',
+        program: 'node',
+        args: ['-e', "Buffer.alloc(256 * 1024 * 1024, 1); setTimeout(() => {}, 10_000)"],
+      },
+      cwd: { mount: 'workspace', path: '.' },
+      limits: { memoryBytes: 96 * 1024 * 1024 },
+    })
+    assert.notEqual(memoryResult.exitCode, 0)
+
+    const processResult = await sandbox.exec({
+      command: {
+        kind: 'exec',
+        program: 'node',
+        args: [
+          '-e',
+          "const {spawn}=require('node:child_process'); for(let i=0;i<8;i++) spawn(process.execPath,['-e','setTimeout(()=>{},10000)']); setTimeout(()=>{},10000)",
+        ],
+      },
+      cwd: { mount: 'workspace', path: '.' },
+      limits: { processes: 2 },
+    })
+    assert.notEqual(processResult.exitCode, 0)
+
+    const controller = new AbortController()
+    const treeExecution = sandbox.exec({
+      command: {
+        kind: 'exec',
+        program: 'node',
+        args: [
+          '-e',
+          "const {spawn}=require('node:child_process'); const child=spawn(process.execPath,['-e',\"setTimeout(()=>require('node:fs').writeFileSync('escaped.txt','escaped'),1000)\"],{detached:true,stdio:'ignore'}); child.unref(); setTimeout(()=>{},10000)",
+        ],
+      },
+      cwd: { mount: 'workspace', path: '.' },
+      signal: controller.signal,
+    })
+    await new Promise((resolveWait) => setTimeout(resolveWait, 200))
+    controller.abort()
+    await treeExecution
+    await new Promise((resolveWait) => setTimeout(resolveWait, 1_500))
+    assert.equal(
+      await access(join(workspace, 'escaped.txt')).then(
+        () => true,
+        () => false,
+      ),
+      false,
+    )
+
     await sandbox.close()
   } finally {
     await client.close().catch(() => {})
