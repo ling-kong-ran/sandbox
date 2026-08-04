@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::os::fd::{FromRawFd, IntoRawFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -523,7 +523,10 @@ fn apply_landlock(read_paths: &[PathBuf], write_paths: &[PathBuf]) -> std::io::R
             ))
             .map_err(std::io::Error::other)?;
     }
-    ruleset.restrict_self().map_err(std::io::Error::other)
+    ruleset
+        .restrict_self()
+        .map(|_| ())
+        .map_err(std::io::Error::other)
 }
 
 fn install_network_seccomp() -> std::io::Result<()> {
@@ -544,7 +547,7 @@ fn install_network_seccomp() -> std::io::Result<()> {
     let filter: BpfProgram = SeccompFilter::new(
         [(libc::SYS_socket, rules)]
             .into_iter()
-            .collect::<HashMap<_, _>>(),
+            .collect::<BTreeMap<_, _>>(),
         SeccompAction::Allow,
         SeccompAction::Errno(libc::EPERM as u32),
         std::env::consts::ARCH

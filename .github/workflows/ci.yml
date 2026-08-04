@@ -46,4 +46,7 @@ jobs:
           sudo chown "$USER":"$(id -gn)" "$AGENT_SANDBOX_CGROUP_ROOT"
           test -f "$AGENT_SANDBOX_CGROUP_ROOT/cgroup.controllers"
       - run: cargo build --workspace
+      - name: Provision Windows native sandbox
+        if: runner.os == 'Windows'
+        run: target/debug/srt-win.exe install
       - run: npm test
