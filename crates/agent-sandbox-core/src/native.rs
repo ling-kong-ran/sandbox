@@ -272,6 +272,19 @@ mod windows_backend {
         }
         message
     }
+
+    fn raw_os_error(error: &(dyn std::error::Error + 'static)) -> Option<i32> {
+        let mut current = Some(error);
+        while let Some(value) = current {
+            if let Some(io_error) = value.downcast_ref::<std::io::Error>()
+                && let Some(code) = io_error.raw_os_error()
+            {
+                return Some(code);
+            }
+            current = value.source();
+        }
+        None
+    }
     use crate::windows_acl;
 
     const SYSTEM_CMD: &str = r"C:\Windows\System32\cmd.exe";
@@ -900,28 +913,42 @@ mod windows_backend {
         let (exe, cmdline) = command_line(&execution.command, &execution.environment)?;
         let profile = sandbox.platform.profile.clone();
         let mut capabilities = SecurityCapabilitiesBuilder::new(&profile.sid);
+        let mut lpac_capabilities =
+            SecurityCapabilitiesBuilder::new(&profile.sid).with_lpac_defaults();
         if sandbox.policy.original.network.mode == NetworkMode::Host {
             capabilities = capabilities.with_known(&[KnownCapability::InternetClient]);
+            lpac_capabilities = lpac_capabilities.with_known(&[KnownCapability::InternetClient]);
         }
         let capabilities = capabilities
             .build()
             .map_err(|error| SandboxError::CapabilityUnavailable(error.to_string()))?;
+        let lpac_capabilities = lpac_capabilities
+            .build()
+            .map_err(|error| SandboxError::CapabilityUnavailable(error.to_string()))?;
         let env = process_environment(&execution.environment, &workdir)?;
         let limits = execution.limits.clone();
+        let force_lpac = std::env::var_os("AGENT_SANDBOX_FORCE_LPAC").is_some();
         let launched = tokio::task::spawn_blocking(move || {
-            launch_in_container_with_io(
-                &capabilities,
-                &LaunchOptions {
-                    exe,
-                    cmdline,
-                    cwd: Some(workdir),
-                    env: Some(env),
-                    stdio: StdioConfig::Pipe,
-                    join_job: Some(job_limits(&limits)),
-                    ..Default::default()
-                },
-            )
-            .map_err(|error| {
+            let options = LaunchOptions {
+                exe,
+                cmdline,
+                cwd: Some(workdir),
+                env: Some(env),
+                stdio: StdioConfig::Pipe,
+                join_job: Some(job_limits(&limits)),
+                ..Default::default()
+            };
+            let result = if force_lpac {
+                launch_in_container_with_io(&lpac_capabilities, &options)
+            } else {
+                match launch_in_container_with_io(&capabilities, &options) {
+                    Err(error) if raw_os_error(&error) == Some(203) => {
+                        launch_in_container_with_io(&lpac_capabilities, &options)
+                    }
+                    result => result,
+                }
+            };
+            result.map_err(|error| {
                 SandboxError::Process(format!(
                     "failed to launch AppContainer process: {}",
                     error_chain(&error)
@@ -1203,7 +1230,7 @@ mod windows_backend {
         use std::fmt::{Display, Formatter};
         use std::path::Path;
 
-        use super::{error_chain, process_environment_with, quote_windows_argument};
+        use super::{error_chain, process_environment_with, quote_windows_argument, raw_os_error};
 
         #[derive(Debug)]
         struct LaunchStageError(std::io::Error);
@@ -1226,6 +1253,7 @@ mod windows_backend {
             let message = error_chain(&error);
             assert!(message.starts_with("CreateProcessW failed: "));
             assert!(message.contains("os error 5"));
+            assert_eq!(raw_os_error(&error), Some(5));
         }
 
         #[test]
