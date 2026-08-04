@@ -58,4 +58,10 @@ jobs:
         run: target/debug/srt-win.exe install
       - name: Report native sandbox capability
         run: target/debug/agent-sandboxd probe --json
-      - run: npm test
+      - name: Run Node conformance
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = Linux ]; then
+            echo "$BASHPID" | sudo tee "$AGENT_SANDBOX_CGROUP_ROOT/cgroup.procs" >/dev/null
+          fi
+          npm test
