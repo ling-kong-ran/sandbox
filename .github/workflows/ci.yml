@@ -62,6 +62,6 @@ jobs:
         shell: bash
         run: |
           if [ "${{ runner.os }}" = Linux ]; then
-            echo "$BASHPID" | sudo tee "$AGENT_SANDBOX_CGROUP_ROOT/cgroup.procs" >/dev/null
+            echo "$$" | sudo tee "$AGENT_SANDBOX_CGROUP_ROOT/cgroup.procs" >/dev/null
           fi
           npm test
