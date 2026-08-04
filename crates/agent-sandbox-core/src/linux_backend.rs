@@ -269,6 +269,18 @@ pub(crate) async fn spawn(
             .wait()
             .map(|status| status.code().unwrap_or(1))
             .map_err(|error| SandboxError::Process(format!("bubblewrap wait failed: {error}")));
+        if std::env::var_os("AGENT_SANDBOX_DEBUG").is_some() {
+            for name in ["pids.current", "pids.events", "cgroup.procs"] {
+                let value = std::fs::read_to_string(wait_cgroup.path.join(name))
+                    .unwrap_or_else(|error| format!("unavailable: {error}"));
+                eprintln!(
+                    "agent-sandboxd: cgroup={} {}={}",
+                    wait_cgroup.path.display(),
+                    name,
+                    value.trim().replace('\n', ",")
+                );
+            }
+        }
         wait_cgroup.done.store(true, Ordering::Release);
         wait_cgroup.kill();
         result
