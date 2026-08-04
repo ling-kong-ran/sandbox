@@ -4,14 +4,13 @@ use std::ffi::{CStr, CString};
 use std::os::fd::{FromRawFd, IntoRawFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 use agent_sandbox_protocol::{
     CapabilityReport, CommandSpec, EnforcementStatus, FeatureState, MountAccess, NetworkMode,
-    ResourceLimits,
+    ResourceLimits, ShellChoice,
 };
-use sha2::{Digest, Sha256};
 
 use crate::{NativeProcess, SandboxError, ValidatedExecution, ValidatedPolicy};
 
@@ -220,12 +219,10 @@ fn native_workdir(policy: &ValidatedPolicy, logical: &str) -> Result<PathBuf, Sa
 fn command_line(command: &CommandSpec) -> Result<(PathBuf, Vec<String>), SandboxError> {
     match command {
         CommandSpec::Exec { program, args } => Ok((PathBuf::from(program), args.clone())),
-        CommandSpec::Shell { shell, script } if shell == "default" => {
-            Ok((PathBuf::from("/bin/sh"), vec!["-c".into(), script.clone()]))
-        }
-        CommandSpec::Shell { shell, .. } => Err(SandboxError::InvalidPolicy(format!(
-            "unsupported native shell: {shell}"
-        ))),
+        CommandSpec::Shell {
+            shell: ShellChoice::Default,
+            script,
+        } => Ok((PathBuf::from("/bin/sh"), vec!["-c".into(), script.clone()])),
     }
 }
 
