@@ -261,6 +261,17 @@ mod windows_backend {
     use serde::{Deserialize, Serialize};
 
     use super::*;
+
+    fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
+        let mut message = error.to_string();
+        let mut source = error.source();
+        while let Some(current) = source {
+            message.push_str(": ");
+            message.push_str(&current.to_string());
+            source = current.source();
+        }
+        message
+    }
     use crate::windows_acl;
 
     const SYSTEM_CMD: &str = r"C:\Windows\System32\cmd.exe";
@@ -911,7 +922,10 @@ mod windows_backend {
                 },
             )
             .map_err(|error| {
-                SandboxError::Process(format!("failed to launch AppContainer process: {error}"))
+                SandboxError::Process(format!(
+                    "failed to launch AppContainer process: {}",
+                    error_chain(&error)
+                ))
             })
         })
         .await
@@ -1135,7 +1149,33 @@ mod windows_backend {
 
     #[cfg(test)]
     mod tests {
-        use super::quote_windows_argument;
+        use std::error::Error;
+        use std::fmt::{Display, Formatter};
+
+        use super::{error_chain, quote_windows_argument};
+
+        #[derive(Debug)]
+        struct LaunchStageError(std::io::Error);
+
+        impl Display for LaunchStageError {
+            fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("CreateProcessW failed")
+            }
+        }
+
+        impl Error for LaunchStageError {
+            fn source(&self) -> Option<&(dyn Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+
+        #[test]
+        fn preserves_native_launch_error_sources() {
+            let error = LaunchStageError(std::io::Error::from_raw_os_error(5));
+            let message = error_chain(&error);
+            assert!(message.starts_with("CreateProcessW failed: "));
+            assert!(message.contains("os error 5"));
+        }
 
         #[test]
         fn quotes_windows_arguments_with_backslashes_and_quotes() {
