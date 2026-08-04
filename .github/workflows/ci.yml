@@ -42,6 +42,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y bubblewrap
+          if sysctl kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
           sudo mkdir -p "$AGENT_SANDBOX_CGROUP_ROOT"
           sudo chown "$USER":"$(id -gn)" "$AGENT_SANDBOX_CGROUP_ROOT"
           test -f "$AGENT_SANDBOX_CGROUP_ROOT/cgroup.controllers"
@@ -49,4 +52,6 @@ jobs:
       - name: Provision Windows native sandbox
         if: runner.os == 'Windows'
         run: target/debug/srt-win.exe install
+      - name: Report native sandbox capability
+        run: target/debug/agent-sandboxd probe --json
       - run: npm test
