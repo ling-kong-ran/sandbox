@@ -404,16 +404,10 @@ fn create_cgroup(root: &Path, limits: &ResourceLimits) -> Result<Arc<Cgroup>, Sa
         done: AtomicBool::new(false),
     });
     let period = 100_000_u64;
-    let quota = limits
-        .cpu_time_ms
-        .saturating_mul(period)
-        .checked_div(limits.wall_time_ms.max(1))
-        .unwrap_or(period)
-        .clamp(1_000, period);
     for (name, value) in [
         ("memory.max", limits.memory_bytes.to_string()),
         ("pids.max", limits.processes.to_string()),
-        ("cpu.max", format!("{quota} {period}")),
+        ("cpu.max", format!("{period} {period}")),
     ] {
         std::fs::write(cgroup.path.join(name), value).map_err(|error| {
             SandboxError::Process(format!("cannot configure cgroup {name}: {error}"))
