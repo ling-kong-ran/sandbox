@@ -169,7 +169,7 @@ test('Windows native backend confines an arbitrary host executable', async (t) =
         program: 'node',
         args: [
           '-e',
-          "const {spawn}=require('node:child_process'); for(let i=0;i<8;i++) spawn(process.execPath,['-e','setTimeout(()=>{},10000)']); setTimeout(()=>{},10000)",
+          "const {spawn}=require('node:child_process'); let failed=false; for(let i=0;i<8;i++){const child=spawn(process.execPath,['-e','setTimeout(()=>{},10000)']); child.on('error',()=>{failed=true}); child.on('exit',code=>{if(code!==0)failed=true})} setTimeout(()=>process.exit(failed?42:0),2000)",
         ],
       },
       cwd: { mount: 'workspace', path: '.' },
