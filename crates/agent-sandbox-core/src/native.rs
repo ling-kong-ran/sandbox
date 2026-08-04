@@ -636,7 +636,7 @@ mod windows_backend {
             profile_name: profile_name.clone(),
             sid: profile.sid.as_string().to_string(),
             mounts: mounts.clone(),
-            acl_strategy: ACL_STRATEGY_ROOT_INHERITED,
+            acl_strategy: ACL_STRATEGY_LEGACY_TREE,
         };
         let bytes = serde_json::to_vec(&record)
             .map_err(|error| SandboxError::Internal(error.to_string()))?;

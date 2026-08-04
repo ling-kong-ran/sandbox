@@ -54,8 +54,19 @@ impl Drop for LocalAllocation {
 }
 
 pub fn grant_tree(root: &Path, sid: &str, access: u32) -> Result<(), SandboxError> {
-    checked_tree(root, true)?;
-    grant_root(root, sid, access)
+    let entries = checked_tree(root, true)?;
+    let mut granted: Vec<PathBuf> = Vec::new();
+    for (path, is_directory) in entries {
+        let inheritance = if is_directory { INHERIT_CHILDREN } else { 0 };
+        if let Err(error) = apply_acl(&path, sid, Some(access), inheritance) {
+            for granted_path in granted.into_iter().rev() {
+                let _ = apply_acl(&granted_path, sid, None, 0);
+            }
+            return Err(error);
+        }
+        granted.push(path);
+    }
+    Ok(())
 }
 
 pub fn grant_root(root: &Path, sid: &str, access: u32) -> Result<(), SandboxError> {
