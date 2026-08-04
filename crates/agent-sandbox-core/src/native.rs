@@ -231,11 +231,11 @@ pub struct NativeProcess {
     pub stdout: Option<tokio::fs::File>,
     pub stderr: Option<tokio::fs::File>,
     #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
-    wait: tokio::task::JoinHandle<Result<i32, SandboxError>>,
+    pub(crate) wait: tokio::task::JoinHandle<Result<i32, SandboxError>>,
     #[cfg(windows)]
-    control: windows_backend::ProcessControl,
+    pub(crate) control: windows_backend::ProcessControl,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    control: crate::unix_backend::ProcessControl,
+    pub(crate) control: crate::unix_backend::ProcessControl,
 }
 
 #[derive(Debug, Clone)]
