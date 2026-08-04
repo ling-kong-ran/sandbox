@@ -178,12 +178,12 @@ test('Unix native backend confines arbitrary executables and denies network acce
         program: 'node',
         args: [
           '-e',
-          "const fs=require('node:fs'); const {spawn}=require('node:child_process'); fs.rmSync('process-started.log',{force:true}); const code=\"require('node:fs').appendFileSync('process-started.log',process.pid+'\\\\n');setTimeout(()=>{},10000)\"; for(let i=0;i<12;i++){const child=spawn(process.execPath,['-e',code]); child.on('error',()=>{})} setTimeout(()=>{const count=fs.existsSync('process-started.log')?fs.readFileSync('process-started.log','utf8').trim().split('\\n').length:0;process.exit(count<4?42:0)},2000)",
+          "const fs=require('node:fs'); const {spawn}=require('node:child_process'); fs.rmSync('process-started.log',{force:true}); const code=\"require('node:fs').appendFileSync('process-started.log',process.pid+'\\\\n');setTimeout(()=>{},10000)\"; for(let i=0;i<12;i++){const child=spawn(process.execPath,['-e',code]); child.on('error',()=>{})} setTimeout(()=>{const count=fs.existsSync('process-started.log')?fs.readFileSync('process-started.log','utf8').trim().split('\\n').length:0;process.exit(count)},2000)",
         ],
       },
       cwd: { mount: 'workspace', path: '.' },
     })
-    assert.notEqual(processResult.exitCode, 0)
+    assert.ok(processResult.exitCode < 4, `started descendants: ${processResult.exitCode}`)
     await processSandbox.close()
 
     const treeSandbox = await client.createSandbox({
