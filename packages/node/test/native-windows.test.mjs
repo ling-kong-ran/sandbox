@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
-import { access, mkdtemp, mkdir, readdir, rm, writeFile } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
+import { createHash } from 'node:crypto'
+import { access, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { dirname, join, resolve } from 'node:path'
 import test from 'node:test'
 
 import { AgentSandboxClient } from '../src/index.mjs'
@@ -16,17 +17,23 @@ async function daemonExists() {
   }
 }
 
-function policy(workspace) {
+function policy(workspace, executable, sha256) {
   return {
     schemaVersion: 1,
     backend: 'native',
     filesystem: {
-      mounts: [{ name: 'workspace', source: workspace, access: 'read-write' }],
+      mounts: [
+        { name: 'workspace', source: workspace, access: 'read-write' },
+        { name: 'runtime', source: dirname(executable), access: 'read-only' },
+      ],
       protectedRoots: [],
       tempBytes: 64 * 1024 * 1024,
     },
     network: { mode: 'deny' },
-    environment: { inherit: [], allowSet: [] },
+    environment: { inherit: ['PATH'], allowSet: [] },
+    execution: {
+      executables: [{ alias: 'node', path: executable, sha256 }],
+    },
     limits: {
       wallTimeMs: 15_000,
       cpuTimeMs: 10_000,
@@ -37,7 +44,7 @@ function policy(workspace) {
   }
 }
 
-test('Windows native backend executes in AppContainer and denies unmounted files', async (t) => {
+test('Windows native backend confines an arbitrary host executable', async (t) => {
   if (process.platform !== 'win32' || !(await daemonExists())) {
     t.skip('requires a locally built Windows agent-sandboxd')
     return
@@ -46,6 +53,7 @@ test('Windows native backend executes in AppContainer and denies unmounted files
   const testRoot = resolve('target/native-tests')
   const stateDirectory = resolve('target/native-test-state')
   await mkdir(testRoot, { recursive: true })
+  await rm(stateDirectory, { recursive: true, force: true })
   await mkdir(stateDirectory, { recursive: true })
   const root = await mkdtemp(join(testRoot, 'execution-'))
   const workspace = join(root, 'workspace')
@@ -53,6 +61,8 @@ test('Windows native backend executes in AppContainer and denies unmounted files
   await mkdir(workspace)
   await writeFile(secret, 'must-not-be-readable')
 
+  const executable = resolve(process.execPath)
+  const sha256 = createHash('sha256').update(await readFile(executable)).digest('hex')
   const diagnostics = []
   const client = await AgentSandboxClient.spawn({
     executable: daemon,
@@ -70,20 +80,24 @@ test('Windows native backend executes in AppContainer and denies unmounted files
 
   try {
     const report = await client.probe()
-    assert.equal(report.backend, 'windows-appcontainer')
+    assert.equal(report.backend, 'windows-user-wfp-job')
     assert.equal(report.features.networkDeny, 'enforced')
-    assert.equal(report.features.filesystemReadBoundary, 'enforced')
+    assert.equal(report.features.filesystemReadBoundary, 'limited')
 
     const sandbox = await client.createSandbox({
       tenantId: 'test-tenant',
       profile: 'system-minimal',
       authorizationId: 'test-authorization',
-      policy: policy(workspace),
+      policy: policy(workspace, executable, sha256),
     })
 
     const output = []
     const success = await sandbox.exec({
-      command: { kind: 'shell', shell: 'default', script: 'echo native-ok' },
+      command: {
+        kind: 'exec',
+        program: 'node',
+        args: ['-e', "require('node:fs').writeFileSync('created.txt', 'native-ok'); console.log('native-ok')"],
+      },
       cwd: { mount: 'workspace', path: '.' },
       onOutput: ({ bytes }) => output.push(bytes),
     })
@@ -94,22 +108,28 @@ test('Windows native backend executes in AppContainer and denies unmounted files
     const deniedOutput = []
     const denied = await sandbox.exec({
       command: {
-        kind: 'shell',
-        shell: 'default',
-        script: `type "${secret}"`,
+        kind: 'exec',
+        program: 'node',
+        args: ['-e', `process.stdout.write(require('node:fs').readFileSync(${JSON.stringify(secret)}, 'utf8'))`],
       },
       cwd: { mount: 'workspace', path: '.' },
       onOutput: ({ bytes }) => deniedOutput.push(bytes),
     })
-    assert.notEqual(denied.exitCode, 0)
-    assert.doesNotMatch(Buffer.concat(deniedOutput).toString('utf8'), /must-not-be-readable/)
+    const deniedText = Buffer.concat(deniedOutput).toString('utf8')
+    if (report.features.filesystemReadBoundary === 'enforced') {
+      assert.notEqual(denied.exitCode, 0)
+      assert.doesNotMatch(deniedText, /must-not-be-readable/)
+    } else {
+      assert.equal(denied.exitCode, 0)
+      assert.match(deniedText, /must-not-be-readable/)
+    }
 
     const environmentOutput = []
     const environmentDenied = await sandbox.exec({
       command: {
-        kind: 'shell',
-        shell: 'default',
-        script: 'set OPENAI_API_KEY',
+        kind: 'exec',
+        program: 'node',
+        args: ['-e', "if (process.env.OPENAI_API_KEY) { console.log(process.env.OPENAI_API_KEY) } else { process.exit(1) }"],
       },
       cwd: { mount: 'workspace', path: '.' },
       onOutput: ({ bytes }) => environmentOutput.push(bytes),

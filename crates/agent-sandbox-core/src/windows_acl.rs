@@ -80,17 +80,6 @@ pub fn revoke_root(root: &Path, sid: &str) -> Result<(), SandboxError> {
     apply_acl(root, sid, None, 0)
 }
 
-pub fn revoke_tree(root: &Path, sid: &str) -> Result<(), SandboxError> {
-    if !root.exists() {
-        return Ok(());
-    }
-    let entries = checked_tree(root, false)?;
-    for (path, _) in entries {
-        apply_acl(&path, sid, None, 0)?;
-    }
-    Ok(())
-}
-
 fn checked_tree(root: &Path, reject_aliases: bool) -> Result<Vec<(PathBuf, bool)>, SandboxError> {
     let canonical_root = root.canonicalize().map_err(|error| {
         SandboxError::CapabilityUnavailable(format!(

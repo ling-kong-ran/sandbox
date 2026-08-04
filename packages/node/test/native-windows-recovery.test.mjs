@@ -46,7 +46,7 @@ test('Windows native daemon recovers ACL journals after abrupt client death', as
   await mkdir(workspace, { recursive: true })
   await mkdir(stateDirectory, { recursive: true })
   for (const entry of await readdir(stateDirectory)) {
-    await rm(join(stateDirectory, entry), { force: true })
+    await rm(join(stateDirectory, entry), { recursive: true, force: true })
   }
 
   const env = { ...process.env, AGENT_SANDBOX_STATE_DIR: stateDirectory }
@@ -61,7 +61,7 @@ test('Windows native daemon recovers ACL journals after abrupt client death', as
     authorizationId: 'recovery-authorization',
     policy: recoveryPolicy,
   })
-  assert.equal((await readdir(stateDirectory)).length, 1)
+  assert.equal((await readdir(join(stateDirectory, 'leases'))).length, 1)
 
   abandoned.child.kill()
   await abandoned.closePromise
@@ -72,7 +72,7 @@ test('Windows native daemon recovers ACL journals after abrupt client death', as
     client: { name: 'recovery-probe', version: '0.1.0' },
   })
   try {
-    assert.equal((await readdir(stateDirectory)).length, 0)
+    assert.equal((await readdir(join(stateDirectory, 'leases'))).length, 0)
   } finally {
     await recovered.close()
     await rm(workspace, { recursive: true, force: true })

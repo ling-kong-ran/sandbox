@@ -1,11 +1,4 @@
-#[cfg(windows)]
-use std::collections::BTreeMap;
-#[cfg(windows)]
-use std::path::{Path, PathBuf};
-
 use agent_sandbox_protocol::{CapabilityReport, EnforcementStatus, FeatureState};
-#[cfg(windows)]
-use agent_sandbox_protocol::{CommandSpec, FilesystemLeaseMode, MountAccess, NetworkMode};
 use sha2::{Digest, Sha256};
 
 use crate::{SandboxError, ValidatedExecution, ValidatedPolicy};
@@ -295,7 +288,11 @@ fn feature_names() -> [&'static str; 8] {
 }
 
 #[cfg(windows)]
-mod windows_backend {
+#[path = "windows_user_backend.rs"]
+mod windows_backend;
+
+#[cfg(any())]
+mod windows_appcontainer_backend {
     use std::ffi::OsString;
     use std::sync::{Arc, Mutex};
 

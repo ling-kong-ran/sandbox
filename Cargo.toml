@@ -3,6 +3,7 @@ members = [
   "crates/agent-sandbox-protocol",
   "crates/agent-sandbox-core",
   "crates/agent-sandboxd",
+  "vendor/srt-win",
 ]
 resolver = "2"
 
@@ -26,3 +27,10 @@ thiserror = "2"
 tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
 uuid = { version = "1", features = ["serde", "v4"] }
 walkdir = "2"
+
+[profile.release]
+strip = true
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"

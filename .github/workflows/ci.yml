@@ -28,11 +28,22 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      AGENT_SANDBOX_CGROUP_ROOT: ${{ runner.os == 'Linux' && '/sys/fs/cgroup/agent-sandbox-ci' || '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 20
       - uses: dtolnay/rust-toolchain@stable
+      - name: Prepare Linux native sandbox prerequisites
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          sudo mkdir -p "$AGENT_SANDBOX_CGROUP_ROOT"
+          sudo chown "$USER":"$(id -gn)" "$AGENT_SANDBOX_CGROUP_ROOT"
+          test -f "$AGENT_SANDBOX_CGROUP_ROOT/cgroup.controllers"
       - run: cargo build --workspace
       - run: npm test
