@@ -499,7 +499,13 @@ fn runtime_read_paths(
             paths.insert(path.canonicalize().unwrap_or(path));
         }
     }
-    for path in ["/etc/ld.so.cache", "/dev/null", "/dev/urandom"] {
+    for path in [
+        "/etc/ld.so.cache",
+        "/dev/null",
+        "/dev/urandom",
+        "/proc/sys/kernel/overflowuid",
+        "/proc/sys/kernel/overflowgid",
+    ] {
         let path = PathBuf::from(path);
         if path.exists() {
             paths.insert(path.canonicalize().unwrap_or(path));
